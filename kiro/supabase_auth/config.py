@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import FrozenSet, Optional, Tuple
+from urllib.parse import urlsplit
 
 from kiro import config as raw
 
@@ -112,6 +113,87 @@ def _parse_origins(raw_value: str) -> Tuple[str, ...]:
         if origin and origin not in origins:
             origins.append(origin)
     return tuple(origins)
+
+
+# ==================================================================================================
+# CORS policy resolver (M1) — standalone, NOT coupled to build_config()
+# ==================================================================================================
+#
+# Decided (M1): allow_credentials is always FALSE. Phase B uses Bearer tokens in
+# the Authorization header (a regular request header), never browser-managed
+# cookies, so CORS "credentials" are not required. A non-credentialed policy is
+# browser-safe and an empty allowlist is therefore valid (M1-D3).
+#
+# This resolver depends ONLY on USER_AUTH_CORS_ALLOWED_ORIGINS. It must NOT call
+# build_config() / require SUPABASE_URL: the gateway is a general-purpose proxy
+# with deployments that do not use Supabase, and CORS hardening must apply to all
+# of them without forcing full Phase C config.
+
+# allow_credentials is locked to False for M1 (M1-D1 = NO). Kept as a named
+# constant so the posture is explicit and auditable rather than a bare literal.
+CORS_ALLOW_CREDENTIALS: bool = False
+
+
+@dataclass(frozen=True)
+class CorsPolicy:
+    """Resolved, validated CORS policy for the app's middleware (M1)."""
+
+    allow_origins: Tuple[str, ...]
+    allow_credentials: bool
+
+
+def _validate_origin_format(origin: str) -> None:
+    """
+    Validate a single CORS origin is a well-formed ``scheme://host[:port]`` (R2).
+
+    Rejects paths, trailing slashes, embedded whitespace, and non-http(s)
+    schemes. Raises SupabaseAuthConfigError naming the offending entry.
+    """
+    if origin != origin.strip() or any(ch.isspace() for ch in origin):
+        raise SupabaseAuthConfigError(
+            f"Invalid CORS origin {origin!r}: must not contain whitespace."
+        )
+    parts = urlsplit(origin)
+    if parts.scheme not in ("http", "https"):
+        raise SupabaseAuthConfigError(
+            f"Invalid CORS origin {origin!r}: scheme must be 'http' or 'https'."
+        )
+    if not parts.netloc:
+        raise SupabaseAuthConfigError(
+            f"Invalid CORS origin {origin!r}: missing host (expected "
+            f"'scheme://host[:port]')."
+        )
+    # An origin is scheme + host + optional port only — no path/query/fragment.
+    if parts.path or parts.query or parts.fragment:
+        raise SupabaseAuthConfigError(
+            f"Invalid CORS origin {origin!r}: must not include a path, query, or "
+            f"trailing slash (expected 'scheme://host[:port]')."
+        )
+
+
+def get_cors_policy() -> CorsPolicy:
+    """
+    Resolve and validate the CORS policy from USER_AUTH_CORS_ALLOWED_ORIGINS.
+
+    Rules enforced (fail-fast via SupabaseAuthConfigError):
+      - R1: '*' is forbidden (a credentialed wildcard must be impossible; and
+            even non-credentialed, the prior wildcard default WAS the S5 issue).
+      - R2: each origin must be a well-formed scheme://host[:port].
+      - R3: duplicates are de-duped silently (via _parse_origins).
+      - R4: an empty allowlist is valid because credentials are disabled (M1-D3).
+
+    Standalone by design — does not require SUPABASE_URL (see module note above),
+    so it is safe to call at app-construction time for every deployment.
+    """
+    origins = _parse_origins(raw.USER_AUTH_CORS_ALLOWED_ORIGINS or "")
+    if "*" in origins:
+        raise SupabaseAuthConfigError(
+            "USER_AUTH_CORS_ALLOWED_ORIGINS must not contain '*': wildcard CORS "
+            "is forbidden. List exact origins (scheme://host[:port]) instead."
+        )
+    for origin in origins:
+        _validate_origin_format(origin)
+    return CorsPolicy(allow_origins=origins, allow_credentials=CORS_ALLOW_CREDENTIALS)
 
 
 def _parse_non_negative_int(name: str, raw_value: object) -> int:

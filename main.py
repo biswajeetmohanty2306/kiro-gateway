@@ -88,6 +88,7 @@ from kiro.routes_openai import router as openai_router
 from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
+from kiro.supabase_auth.config import get_cors_policy
 
 
 # --- Loguru Configuration ---
@@ -543,14 +544,23 @@ app = FastAPI(
 
 
 # --- CORS Middleware ---
-# Allow CORS for all origins to support browser clients
-# and tools that send preflight OPTIONS requests
+# Origin allowlist sourced from USER_AUTH_CORS_ALLOWED_ORIGINS (M1, S5).
+# Resolved and validated at app-construction time so the check runs under BOTH
+# `python main.py` and `uvicorn main:app` (validate_configuration() does NOT run
+# under uvicorn). A '*' or malformed origin fails fast here. allow_credentials is
+# locked False (M1-D1): the gateway authenticates via Bearer tokens, not cookies.
+# An invalid CORS config must stop startup, so this is intentionally not guarded.
+_cors_policy = get_cors_policy()
+logger.info(
+    f"CORS policy: allow_origins={list(_cors_policy.allow_origins) or '[] (no cross-origin browser access)'}, "
+    f"allow_credentials={_cors_policy.allow_credentials}"
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=list(_cors_policy.allow_origins),
+    allow_credentials=_cors_policy.allow_credentials,
+    allow_methods=["*"],  # Methods are not the exposure; origin+credentials is.
+    allow_headers=["*"],
 )
 
 
