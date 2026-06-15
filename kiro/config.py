@@ -560,6 +560,68 @@ APP_TITLE: str = "Kiro Gateway"
 APP_DESCRIPTION: str = "Proxy gateway for Kiro API (Amazon Q Developer / AWS CodeWhisperer). OpenAI and Anthropic compatible. Made by @jwadow"
 
 
+# ==================================================================================================
+# Supabase User-Auth Settings (Phase C — downstream user JWT validation)
+# ==================================================================================================
+#
+# DOWNSTREAM auth: verifies the identity of OUR application's users on each
+# request. Entirely separate from the UPSTREAM Kiro/AWS credentials above — a
+# user JWT never reaches the Kiro API.
+#
+# These are RAW values only. Validation, derivation (JWKS URL, expected iss),
+# the fixed accepted-algorithm set, and the CORS-policy checks happen in the
+# package-local config object (kiro/supabase_auth/config.py), which is built
+# lazily and does NOT run at import time. Nothing here changes app startup.
+#
+# Confirmed scheme (D1): the Supabase project signs asymmetrically (ECC P-256 /
+# ES256 via JWKS); the legacy HS256 key exists only as a previous key. Hence the
+# default scheme is "asymmetric".
+
+# Supabase API base URL (forms the JWKS URL and the expected `iss`).
+SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+
+# Supabase project ref (subdomain part of SUPABASE_URL).
+SUPABASE_PROJECT_REF: str = os.getenv("SUPABASE_PROJECT_REF", "")
+
+# Signing scheme: "asymmetric" (default, JWKS/ES256/RS256) or "symmetric" (HS256).
+SUPABASE_JWT_ALG_SCHEME: str = os.getenv("SUPABASE_JWT_ALG_SCHEME", "asymmetric").lower()
+
+# SECRET — shared HS256 secret. Only used when scheme is "symmetric".
+SUPABASE_JWT_SECRET: str = os.getenv("SUPABASE_JWT_SECRET", "")
+
+# SECRET — service-role key. Used only for audit-log writes (bypasses RLS).
+SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+# SECRET — asyncpg connection string for the Supabase Postgres database.
+SUPABASE_DB_URL: str = os.getenv("SUPABASE_DB_URL", "")
+
+# Expected JWT `aud` claim (Supabase issues "authenticated" for logged-in users).
+SUPABASE_EXPECTED_AUD: str = os.getenv("SUPABASE_EXPECTED_AUD", "authenticated")
+
+# Expected JWT `iss` claim. Empty → derive "<SUPABASE_URL>/auth/v1" in package config.
+SUPABASE_EXPECTED_ISS: str = os.getenv("SUPABASE_EXPECTED_ISS", "")
+
+# CORS allowed origins for the user-facing surface (comma-separated exact origins).
+# Raw string here; parsed and validated (no credentialed wildcard) in package config.
+USER_AUTH_CORS_ALLOWED_ORIGINS: str = os.getenv("USER_AUTH_CORS_ALLOWED_ORIGINS", "")
+
+# Clock-skew leeway (seconds) for exp/nbf/iat verification.
+# Raw string here; parsed and validated as int in package config (build_config).
+USER_AUTH_JWT_LEEWAY_SECONDS: str = os.getenv("USER_AUTH_JWT_LEEWAY_SECONDS", "60")
+
+# Minimum seconds between forced JWKS refreshes per `kid` (DoS guard; consumed in M3).
+# Raw string here; parsed and validated as int in package config (build_config).
+USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS: str = os.getenv(
+    "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS", "60"
+)
+
+# Auth-failure rate limit for the unauthenticated surface (consumed in M3).
+# Raw string here; parsed and validated as int in package config (build_config).
+USER_AUTH_AUTH_FAILURE_RATE_LIMIT: str = os.getenv(
+    "USER_AUTH_AUTH_FAILURE_RATE_LIMIT", "20"
+)
+
+
 def get_kiro_refresh_url(region: str) -> str:
     """Return Kiro Desktop Auth token refresh URL for the specified region."""
     return KIRO_REFRESH_URL_TEMPLATE.format(region=region)

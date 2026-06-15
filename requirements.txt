@@ -6,6 +6,15 @@ loguru
 python-dotenv
 tiktoken
 
+# Phase C — Supabase user auth (pinned)
+# These are security-critical (JWT verification, DB access on the request path),
+# so they are pinned to exact versions for reproducible behavior even though the
+# legacy block above is unpinned. Retroactively pinning the legacy deps is a
+# separate change, out of scope for Phase C. Package names verified against
+# typosquatting: "PyJWT" and "asyncpg" are the canonical PyPI packages.
+PyJWT[crypto]==2.10.1
+asyncpg==0.30.0
+
 # Testing dependencies
 pytest
 pytest-asyncio
