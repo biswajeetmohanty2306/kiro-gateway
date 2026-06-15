@@ -99,6 +99,8 @@ class SupabaseAuthConfig:
 
     # --- Verification tuning ---
     jwt_leeway_seconds: int = 60
+    # JWKS cache positive TTL: max age before a proactive refetch (M2 jwks_cache).
+    jwks_cache_ttl_seconds: int = 600
 
     # --- DoS / throttle knobs (consumed in M3) ---
     jwks_refresh_cooldown_seconds: int = 60
@@ -274,6 +276,9 @@ def build_config() -> SupabaseAuthConfig:
     leeway = _parse_non_negative_int(
         "USER_AUTH_JWT_LEEWAY_SECONDS", raw.USER_AUTH_JWT_LEEWAY_SECONDS
     )
+    cache_ttl = _parse_non_negative_int(
+        "USER_AUTH_JWKS_CACHE_TTL_SECONDS", raw.USER_AUTH_JWKS_CACHE_TTL_SECONDS
+    )
     cooldown = _parse_non_negative_int(
         "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS",
         raw.USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS,
@@ -295,6 +300,7 @@ def build_config() -> SupabaseAuthConfig:
         db_url=(raw.SUPABASE_DB_URL or "").strip(),
         cors_allowed_origins=cors_origins,
         jwt_leeway_seconds=leeway,
+        jwks_cache_ttl_seconds=cache_ttl,
         jwks_refresh_cooldown_seconds=cooldown,
         auth_failure_rate_limit=failure_limit,
     )

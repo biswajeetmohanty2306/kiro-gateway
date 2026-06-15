@@ -615,6 +615,13 @@ USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS: str = os.getenv(
     "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS", "60"
 )
 
+# Positive TTL (seconds) for the JWKS cache: max age before a proactive refetch,
+# bounding how long a retired key stays usable (consumed in M2 jwks_cache).
+# Raw string here; parsed and validated as int in package config (build_config).
+USER_AUTH_JWKS_CACHE_TTL_SECONDS: str = os.getenv(
+    "USER_AUTH_JWKS_CACHE_TTL_SECONDS", "600"
+)
+
 # Auth-failure rate limit for the unauthenticated surface (consumed in M3).
 # Raw string here; parsed and validated as int in package config (build_config).
 USER_AUTH_AUTH_FAILURE_RATE_LIMIT: str = os.getenv(
