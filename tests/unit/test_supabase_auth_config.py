@@ -39,6 +39,10 @@ _DEFAULT_RAW = {
     "USER_AUTH_CORS_ALLOWED_ORIGINS": "",
     "USER_AUTH_JWT_LEEWAY_SECONDS": 60,
     "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS": 60,
+    "USER_AUTH_JWKS_CACHE_TTL_SECONDS": 600,
+    "USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS": 300,
+    "USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE": 1024,
+    "USER_AUTH_JWKS_STALE_GRACE_SECONDS": 3600,
     "USER_AUTH_AUTH_FAILURE_RATE_LIMIT": 20,
 }
 
@@ -163,6 +167,45 @@ class TestRequiredAndInvalidValues:
     def test_negative_leeway(self, set_raw):
         set_raw(USER_AUTH_JWT_LEEWAY_SECONDS=-1)
         with pytest.raises(SupabaseAuthConfigError, match="LEEWAY"):
+            build_config()
+
+
+class TestM3JwksValidation:
+    """M3 negative-cache / cooldown config validation (required checks)."""
+
+    def test_negative_cache_max_size_at_least_one(self, set_raw):
+        set_raw(USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE=0)
+        with pytest.raises(
+            SupabaseAuthConfigError, match="NEGATIVE_CACHE_MAX_SIZE"
+        ):
+            build_config()
+
+    def test_negative_ttl_must_be_ge_cooldown(self, set_raw):
+        set_raw(
+            USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS=30,
+            USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS=60,
+        )
+        with pytest.raises(SupabaseAuthConfigError, match="NEGATIVE_TTL_SECONDS"):
+            build_config()
+
+    def test_negative_ttl_equal_cooldown_ok(self, set_raw):
+        set_raw(
+            USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS=60,
+            USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS=60,
+        )
+        cfg = build_config()
+        assert cfg.jwks_negative_ttl_seconds == 60
+
+    def test_m3_defaults_wired_through(self, set_raw):
+        set_raw()
+        cfg = build_config()
+        assert cfg.jwks_negative_ttl_seconds == 300
+        assert cfg.jwks_negative_cache_max_size == 1024
+        assert cfg.jwks_stale_grace_seconds == 3600
+
+    def test_bad_negative_ttl_value_raises(self, set_raw):
+        set_raw(USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS="abc")
+        with pytest.raises(SupabaseAuthConfigError, match="NEGATIVE_TTL_SECONDS"):
             build_config()
 
 

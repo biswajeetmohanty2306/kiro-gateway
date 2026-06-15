@@ -609,7 +609,8 @@ USER_AUTH_CORS_ALLOWED_ORIGINS: str = os.getenv("USER_AUTH_CORS_ALLOWED_ORIGINS"
 # Raw string here; parsed and validated as int in package config (build_config).
 USER_AUTH_JWT_LEEWAY_SECONDS: str = os.getenv("USER_AUTH_JWT_LEEWAY_SECONDS", "60")
 
-# Minimum seconds between forced JWKS refreshes per `kid` (DoS guard; consumed in M3).
+# Minimum seconds between forced JWKS refreshes (GLOBAL per endpoint; DoS guard).
+# Consumed in M3 jwks_cache as the refresh-rate gate against unknown-kid floods.
 # Raw string here; parsed and validated as int in package config (build_config).
 USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS: str = os.getenv(
     "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS", "60"
@@ -620,6 +621,27 @@ USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS: str = os.getenv(
 # Raw string here; parsed and validated as int in package config (build_config).
 USER_AUTH_JWKS_CACHE_TTL_SECONDS: str = os.getenv(
     "USER_AUTH_JWKS_CACHE_TTL_SECONDS", "600"
+)
+
+# TTL (seconds) for negative-cache entries: how long a confirmed-absent `kid` is
+# rejected without a network call (M3 DoS guard; T1). Must be >= the refresh
+# cooldown (enforced in build_config). Raw string here; parsed in package config.
+USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS: str = os.getenv(
+    "USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS", "300"
+)
+
+# Hard cap on negative-cache entries (LRU eviction) — bounds memory under a
+# distinct-`kid` flood (M3 DoS guard; T3). Must be >= 1 (enforced in build_config).
+# Raw string here; parsed and validated as int in package config.
+USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE: str = os.getenv(
+    "USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE", "1024"
+)
+
+# Grace window (seconds) for serving a stale-but-cached known `kid` when the JWKS
+# endpoint is unreachable, after which even a known `kid` yields 503 (M3; T5).
+# Raw string here; parsed and validated as int in package config (build_config).
+USER_AUTH_JWKS_STALE_GRACE_SECONDS: str = os.getenv(
+    "USER_AUTH_JWKS_STALE_GRACE_SECONDS", "3600"
 )
 
 # Auth-failure rate limit for the unauthenticated surface (consumed in M3).

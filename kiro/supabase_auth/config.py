@@ -104,6 +104,11 @@ class SupabaseAuthConfig:
 
     # --- DoS / throttle knobs (consumed in M3) ---
     jwks_refresh_cooldown_seconds: int = 60
+    # Negative-cache: confirmed-absent kid rejection TTL + hard LRU size cap (M3).
+    jwks_negative_ttl_seconds: int = 300
+    jwks_negative_cache_max_size: int = 1024
+    # Stale-serve grace for a known kid during a JWKS outage, then 503 (M3).
+    jwks_stale_grace_seconds: int = 3600
     auth_failure_rate_limit: int = 20
 
 
@@ -283,9 +288,37 @@ def build_config() -> SupabaseAuthConfig:
         "USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS",
         raw.USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS,
     )
+    negative_ttl = _parse_non_negative_int(
+        "USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS",
+        raw.USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS,
+    )
+    negative_max_size = _parse_non_negative_int(
+        "USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE",
+        raw.USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE,
+    )
+    stale_grace = _parse_non_negative_int(
+        "USER_AUTH_JWKS_STALE_GRACE_SECONDS",
+        raw.USER_AUTH_JWKS_STALE_GRACE_SECONDS,
+    )
     failure_limit = _parse_non_negative_int(
         "USER_AUTH_AUTH_FAILURE_RATE_LIMIT", raw.USER_AUTH_AUTH_FAILURE_RATE_LIMIT
     )
+
+    # The negative cache must hold at least one entry to do its job (T3 bound).
+    if negative_max_size < 1:
+        raise SupabaseAuthConfigError(
+            "USER_AUTH_JWKS_NEGATIVE_CACHE_MAX_SIZE must be >= 1, "
+            f"got {negative_max_size}."
+        )
+
+    # A negative entry must not expire before the cooldown clears, or a bad `kid`
+    # could be re-probed (forcing a refresh) sooner than the cooldown intends.
+    if negative_ttl < cooldown:
+        raise SupabaseAuthConfigError(
+            "USER_AUTH_JWKS_NEGATIVE_TTL_SECONDS "
+            f"({negative_ttl}) must be >= USER_AUTH_JWKS_REFRESH_COOLDOWN_SECONDS "
+            f"({cooldown})."
+        )
 
     return SupabaseAuthConfig(
         supabase_url=supabase_url,
@@ -302,6 +335,9 @@ def build_config() -> SupabaseAuthConfig:
         jwt_leeway_seconds=leeway,
         jwks_cache_ttl_seconds=cache_ttl,
         jwks_refresh_cooldown_seconds=cooldown,
+        jwks_negative_ttl_seconds=negative_ttl,
+        jwks_negative_cache_max_size=negative_max_size,
+        jwks_stale_grace_seconds=stale_grace,
         auth_failure_rate_limit=failure_limit,
     )
 
