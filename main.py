@@ -89,6 +89,8 @@ from kiro.routes_anthropic import router as anthropic_router
 from kiro.exceptions import validation_exception_handler
 from kiro.debug_middleware import DebugLoggerMiddleware
 from kiro.supabase_auth.config import get_cors_policy
+from kiro.supabase_auth.request_id_middleware import RequestIdMiddleware
+from kiro.supabase_auth.bootstrap import build_supabase_auth
 
 
 # --- Loguru Configuration ---
@@ -355,6 +357,19 @@ async def lifespan(app: FastAPI):
         follow_redirects=True
     )
     logger.info("Shared HTTP client created with connection pooling")
+
+    # ==============================================================================
+    # Phase C — Supabase user-auth wiring (M6)
+    # ==============================================================================
+    # Build the user-auth stack (verifier, JWKS cache, rate limiter, audit logger)
+    # ONCE and hang it on app.state. Dormant by design: build_supabase_auth()
+    # returns None when Supabase is unconfigured (get_config() fails), so
+    # deployments that do not use Phase C are unaffected. A present-but-malformed
+    # config raises here and fails startup fast (matching the CORS fail-fast
+    # posture below). The dependency get_current_user is attached to no route yet
+    # (M6 is wiring only; routes + HTTP error mapping are M7).
+    app.state.supabase_auth = await build_supabase_auth()
+
     
     # ==============================================================================
     # Legacy Fallback: .env → credentials.json
@@ -526,6 +541,16 @@ async def lifespan(app: FastAPI):
     await app.state.account_manager._save_state()
     logger.info("Final state saved")
     
+    # Close Phase C user-auth resources (JWKS client, audit pool) if wired (M6).
+    # Best-effort and None-safe: dormant deployments have nothing to close.
+    supabase_auth = getattr(app.state, "supabase_auth", None)
+    if supabase_auth is not None:
+        try:
+            await supabase_auth.aclose()
+            logger.info("Phase C user-auth resources closed")
+        except Exception as e:
+            logger.warning(f"Error closing Phase C user-auth resources: {e}")
+
     # Close HTTP client
     try:
         await app.state.http_client.aclose()
@@ -543,13 +568,29 @@ app = FastAPI(
 )
 
 
-# --- CORS Middleware ---
-# Origin allowlist sourced from USER_AUTH_CORS_ALLOWED_ORIGINS (M1, S5).
-# Resolved and validated at app-construction time so the check runs under BOTH
-# `python main.py` and `uvicorn main:app` (validate_configuration() does NOT run
-# under uvicorn). A '*' or malformed origin fails fast here. allow_credentials is
-# locked False (M1-D1): the gateway authenticates via Bearer tokens, not cookies.
-# An invalid CORS config must stop startup, so this is intentionally not guarded.
+# --- Middleware registration ---
+# Starlette applies middleware LIFO: the LAST add_middleware call is the
+# OUTERMOST layer (first to see the request). To get the request-processing
+# order CORS -> RequestId -> Debug (M6-D4, resolved), we register them in
+# reverse: Debug (innermost) first, then RequestId, then CORS (outermost) last.
+
+# Debug Logger Middleware (innermost) — initializes debug logging BEFORE
+# Pydantic validation so it can capture validation errors (422) in debug logs.
+app.add_middleware(DebugLoggerMiddleware)
+
+# Request-id correlation middleware (M6) — assigns/propagates X-Request-Id and
+# binds it to loguru so debug logs (and downstream auth/audit) carry the id.
+# Sits between CORS and Debug.
+app.add_middleware(RequestIdMiddleware)
+
+# CORS Middleware (outermost) — origin allowlist sourced from
+# USER_AUTH_CORS_ALLOWED_ORIGINS (M1, S5). Resolved and validated at
+# app-construction time so the check runs under BOTH `python main.py` and
+# `uvicorn main:app` (validate_configuration() does NOT run under uvicorn). A
+# '*' or malformed origin fails fast here. allow_credentials is locked False
+# (M1-D1): the gateway authenticates via Bearer tokens, not cookies. An invalid
+# CORS config must stop startup, so this is intentionally not guarded. Outermost
+# so preflight short-circuits and CORS headers are present on error responses.
 _cors_policy = get_cors_policy()
 logger.info(
     f"CORS policy: allow_origins={list(_cors_policy.allow_origins) or '[] (no cross-origin browser access)'}, "
@@ -562,12 +603,6 @@ app.add_middleware(
     allow_methods=["*"],  # Methods are not the exposure; origin+credentials is.
     allow_headers=["*"],
 )
-
-
-# --- Debug Logger Middleware ---
-# Initializes debug logging BEFORE Pydantic validation
-# This allows capturing validation errors (422) in debug logs
-app.add_middleware(DebugLoggerMiddleware)
 
 
 # --- Validation Error Handler Registration ---
