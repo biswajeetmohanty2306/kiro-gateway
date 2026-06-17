@@ -55,7 +55,12 @@ from fastapi import Request
 
 from .audit import AuditEvent
 from .context import get_request_id
-from .exceptions import InvalidTokenError, SupabaseAuthError
+from .exceptions import (
+    AuthRateLimitedError,
+    InvalidTokenError,
+    JwksUnavailableError,
+    SupabaseAuthError,
+)
 from .user import AuthenticatedUser, build_authenticated_user
 
 # Bucket for requests with no determinable client IP — they share one budget
@@ -127,9 +132,11 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
         )
 
     # 1. DoS pre-check (counts the attempt). Throttle path emits NO audit, to
-    #    avoid amplifying abuse into background DB writes.
+    #    avoid amplifying abuse into background DB writes. Raises the dedicated
+    #    AuthRateLimitedError so M7 maps it to 429 + Retry-After (UD-1 → R1),
+    #    never a misleading 401.
     if not bundle.rate_limiter.allow(client_ip):
-        raise InvalidTokenError(
+        raise AuthRateLimitedError(
             "Too many authentication attempts.",
             detail="auth-failure rate limit exceeded",
         )
@@ -164,3 +171,48 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     bundle.rate_limiter.reset(client_ip)
     request.state.user = user
     return user
+
+
+async def require_supabase_user(request: Request) -> AuthenticatedUser:
+    """
+    Route-facing dependency wrapping :func:`get_current_user` for M7.
+
+    Adds ONE behaviour over the M6 dependency: a dormant pre-empt. If Phase C is
+    not wired (``app.state.supabase_auth is None``) this raises
+    :class:`JwksUnavailableError` (→ 503 ``AUTH_BACKEND_UNAVAILABLE`` at M7),
+    NOT the generic :class:`InvalidTokenError` ``get_current_user`` would raise —
+    a dormant backend is a server-side "auth unavailable" condition, not a bad
+    credential, so it must never look like a 401 to the client (plan §1.3, §3).
+
+    Under the activation strategy (plan §1.5) ``routes_user`` is mounted only when
+    Phase C is active, so this branch is defensive belt-and-braces; it also keeps
+    the dependency safe if a deployment mounts the router unconditionally.
+
+    Still performs NO HTTP mapping: it raises a typed :class:`SupabaseAuthError`
+    subtype only. M7's exception handler turns it into a response.
+    """
+    if getattr(request.app.state, "supabase_auth", None) is None:
+        raise JwksUnavailableError(
+            "User authentication is not available.",
+            detail="phase C user-auth dormant (no app.state.supabase_auth)",
+        )
+    return await get_current_user(request)
+
+
+async def get_optional_user(request: Request) -> Optional[AuthenticatedUser]:
+    """
+    Non-raising variant of :func:`get_current_user` (plan §1.3; PhaseC §2.2).
+
+    Returns the :class:`AuthenticatedUser` when the request carries a valid token,
+    or ``None`` on ANY auth failure (missing/expired/invalid token, throttle,
+    dormant backend, JWKS outage). It NEVER raises a :class:`SupabaseAuthError`
+    and so never produces a 401/403/429/503 — for endpoints that vary behaviour by
+    auth presence without requiring it.
+
+    The wrapped :func:`get_current_user` still runs its best-effort failure audit
+    and rate-limit accounting; this wrapper only suppresses the raised exception.
+    """
+    try:
+        return await get_current_user(request)
+    except SupabaseAuthError:
+        return None

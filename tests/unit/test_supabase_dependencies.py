@@ -16,9 +16,14 @@ from types import SimpleNamespace, MappingProxyType
 
 import pytest
 
-from kiro.supabase_auth.dependencies import get_current_user
+from kiro.supabase_auth.dependencies import (
+    get_current_user,
+    get_optional_user,
+    require_supabase_user,
+)
 from kiro.supabase_auth.audit import AuditEvent
 from kiro.supabase_auth.exceptions import (
+    AuthRateLimitedError,
     InvalidTokenError,
     TokenExpiredError,
     JwksUnavailableError,
@@ -169,12 +174,13 @@ class TestBearerExtraction:
 class TestRateLimit:
     @pytest.mark.asyncio
     async def test_throttled_raises_and_does_not_audit(self):
-        # Throttle path must NOT emit an audit row (avoid amplifying abuse).
+        # Throttle path must NOT emit an audit row (avoid amplifying abuse) and
+        # raises the dedicated AuthRateLimitedError (→ 429 at M7), not a 401.
         audit = FakeAudit()
         limiter = FakeLimiter(allow=False)
         bundle = make_bundle(audit=audit, limiter=limiter)
         req = FakeRequest(bundle=bundle, headers=VALID_AUTH)
-        with pytest.raises(InvalidTokenError):
+        with pytest.raises(AuthRateLimitedError):
             await get_current_user(req)
         assert audit.records == []
 
@@ -186,7 +192,7 @@ class TestRateLimit:
         verifier = FakeVerifier(claims=make_claims())
         bundle = make_bundle(limiter=limiter, verifier=verifier)
         req = FakeRequest(bundle=bundle, headers={})
-        with pytest.raises(InvalidTokenError):
+        with pytest.raises(AuthRateLimitedError):
             await get_current_user(req)
         assert verifier.verify_calls == []       # never reached verify
         assert limiter.allow_calls == ["203.0.113.9"]
@@ -246,6 +252,62 @@ class TestDormant:
         req = FakeRequest(bundle=None, headers=VALID_AUTH)
         with pytest.raises(InvalidTokenError):
             await get_current_user(req)
+
+
+class TestRequireSupabaseUser:
+    @pytest.mark.asyncio
+    async def test_success_returns_user(self):
+        bundle = make_bundle()
+        req = FakeRequest(bundle=bundle, headers=VALID_AUTH)
+        user = await require_supabase_user(req)
+        assert isinstance(user, AuthenticatedUser)
+
+    @pytest.mark.asyncio
+    async def test_dormant_preempts_with_jwks_unavailable(self):
+        # Dormant backend → JwksUnavailableError (→ 503 at M7), NOT InvalidTokenError.
+        # A dormant deployment must never look like a bad-credential 401 to clients.
+        req = FakeRequest(bundle=None, headers=VALID_AUTH)
+        with pytest.raises(JwksUnavailableError):
+            await require_supabase_user(req)
+
+    @pytest.mark.asyncio
+    async def test_propagates_typed_errors_unchanged(self):
+        verifier = FakeVerifier(raise_exc=TokenExpiredError("exp"))
+        bundle = make_bundle(verifier=verifier)
+        req = FakeRequest(bundle=bundle, headers=VALID_AUTH)
+        with pytest.raises(TokenExpiredError):
+            await require_supabase_user(req)
+
+
+class TestGetOptionalUser:
+    @pytest.mark.asyncio
+    async def test_returns_user_on_success(self):
+        bundle = make_bundle()
+        req = FakeRequest(bundle=bundle, headers=VALID_AUTH)
+        user = await get_optional_user(req)
+        assert isinstance(user, AuthenticatedUser)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exc_type", [
+        InvalidTokenError, TokenExpiredError, JwksUnavailableError,
+        AuthRateLimitedError,
+    ])
+    async def test_returns_none_on_any_auth_failure(self, exc_type):
+        verifier = FakeVerifier(raise_exc=exc_type("boom"))
+        bundle = make_bundle(verifier=verifier)
+        req = FakeRequest(bundle=bundle, headers=VALID_AUTH)
+        assert await get_optional_user(req) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_dormant(self):
+        req = FakeRequest(bundle=None, headers=VALID_AUTH)
+        assert await get_optional_user(req) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_missing_header(self):
+        bundle = make_bundle()
+        req = FakeRequest(bundle=bundle, headers={})
+        assert await get_optional_user(req) is None
 
 
 class TestNoHttpMapping:

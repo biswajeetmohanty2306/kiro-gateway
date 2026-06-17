@@ -35,6 +35,7 @@ Hierarchy::
     SupabaseAuthError                 (base for all M2+ runtime auth errors)
     ├── InvalidTokenError             → 401 / INVALID_TOKEN  (generic bucket)   [M7]
     ├── TokenExpiredError             → 401 / TOKEN_EXPIRED   (safe distinction) [M7]
+    ├── AuthRateLimitedError          → 429 / RATE_LIMITED + Retry-After (UD-1)  [M7]
     └── JwksUnavailableError          → 503 / transient       (D5)              [M7]
 
 Note: configuration problems use ``SupabaseAuthConfigError`` (defined in
@@ -92,3 +93,17 @@ class JwksUnavailableError(SupabaseAuthError):
     kept distinct so M7 maps it to 503 (back off and retry) rather than 401
     (re-login). Decision D5.
     """
+
+
+class AuthRateLimitedError(SupabaseAuthError):
+    """
+    The auth-failure throttle rejected this attempt (DoS pre-check, M3).
+
+    NOT an authentication verdict: the caller may well hold a valid token — it is
+    simply being rate-limited. Kept distinct from ``InvalidTokenError`` so M7 maps
+    it to 429 (Too Many Requests) with a ``Retry-After`` header, rather than a
+    misleading 401 (UD-1 → R1). Like the base, it carries a secret-free ``detail``
+    for server logs and performs NO HTTP mapping (M7's job). The throttle path is
+    deliberately NOT audited (avoid amplifying abuse into background DB writes).
+    """
+

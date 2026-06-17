@@ -91,6 +91,8 @@ from kiro.debug_middleware import DebugLoggerMiddleware
 from kiro.supabase_auth.config import get_cors_policy
 from kiro.supabase_auth.request_id_middleware import RequestIdMiddleware
 from kiro.supabase_auth.bootstrap import build_supabase_auth
+from kiro.supabase_auth.http import register_exception_handlers
+from kiro.routes_user import router as user_router
 
 
 # --- Loguru Configuration ---
@@ -608,6 +610,14 @@ app.add_middleware(
 # --- Validation Error Handler Registration ---
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
+# --- Phase C user-auth exception handler (M7) ---
+# Single handler mapping the typed SupabaseAuthError family → HTTP status, machine
+# `code`, WWW-Authenticate / Retry-After, and the structured error envelope.
+# Registration is unconditional and harmless when Phase C is dormant (no route
+# raises it). The pure auth layer / M6 dependency raise the typed errors; this is
+# the only place they become responses (M7 boundary).
+register_exception_handlers(app)
+
 
 # --- Route Registration ---
 # OpenAI-compatible API: /v1/models, /v1/chat/completions
@@ -615,6 +625,15 @@ app.include_router(openai_router)
 
 # Anthropic-compatible API: /v1/messages
 app.include_router(anthropic_router)
+
+# Phase C user-auth API: /auth/me, /auth/logout (M7). Guarded by a Supabase user
+# JWT (require_supabase_user), a DIFFERENT auth plane from the /v1 PROXY_API_KEY
+# routes above. Mounted unconditionally: route registration runs at import time,
+# before the lifespan knows whether Phase C is active, so activation cannot gate
+# inclusion here. When Phase C is dormant, require_supabase_user pre-empts with a
+# 503 AUTH_BACKEND_UNAVAILABLE (never a misleading 401) — the documented fallback
+# to conditional mounting (plan §1.5).
+app.include_router(user_router)
 
 
 # --- Uvicorn log config ---
