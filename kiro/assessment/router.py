@@ -192,3 +192,82 @@ async def assessment_complete(
 
     result = await complete_assessment(pool, user_id, body.assessment_id, question_cache)
     return result
+
+
+@router.get("/profile")
+async def assessment_profile(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user_profile),
+):
+    """
+    Get the user's relationship profile (generated from assessment).
+
+    Returns has_profile=true with full dimension breakdown if profile exists,
+    or has_profile=false if the user hasn't completed an assessment yet.
+    Requires auth + onboarding.
+    """
+    from .types import (
+        DIMENSION_ORDER,
+        DIMENSION_DISPLAY_NAMES,
+        get_strength_label,
+        get_type_label,
+        get_type_description,
+    )
+    import json
+
+    pool = _get_pool(request)
+    user_id = _get_user_id(user)
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT p.user_id, p.assessment_id, p.created_at,
+                   p.attachment_style, p.communication_style, p.conflict_style,
+                   p.love_language, p.financial_personality, p.lifestyle_type,
+                   p.relationship_archetype, p.dimension_scores,
+                   a.score as overall_score
+            FROM public.profiles p
+            JOIN public.assessments a ON a.id = p.assessment_id
+            WHERE p.user_id = $1
+            """,
+            user_id,
+        )
+
+    if not row:
+        return {"has_profile": False, "profile": None}
+
+    # Parse dimension_scores JSONB
+    dim_scores_raw = row["dimension_scores"]
+    if isinstance(dim_scores_raw, str):
+        dim_scores_raw = json.loads(dim_scores_raw)
+
+    # Build enriched dimension response in fixed order
+    dimensions = {}
+    for dim_key in DIMENSION_ORDER:
+        dim_data = dim_scores_raw.get(dim_key, {})
+        type_key = dim_data.get("type", "unknown")
+        strength = dim_data.get("strength", 0)
+        score = dim_data.get("score", 0)
+        sub_scores = dim_data.get("sub_scores", {})
+
+        dimensions[dim_key] = {
+            "type": type_key,
+            "label": get_type_label(dim_key, type_key),
+            "strength": strength,
+            "strength_label": get_strength_label(strength),
+            "score": score,
+            "description": get_type_description(dim_key, type_key),
+            "dimension_name": DIMENSION_DISPLAY_NAMES.get(dim_key, dim_key),
+            "sub_scores": sub_scores,
+        }
+
+    return {
+        "has_profile": True,
+        "profile": {
+            "user_id": str(row["user_id"]),
+            "assessment_id": str(row["assessment_id"]),
+            "created_at": row["created_at"].isoformat(),
+            "overall_score": float(row["overall_score"]) if row["overall_score"] else 0.0,
+            "dimensions": dimensions,
+        },
+    }
