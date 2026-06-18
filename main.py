@@ -93,6 +93,8 @@ from kiro.supabase_auth.request_id_middleware import RequestIdMiddleware
 from kiro.supabase_auth.bootstrap import build_supabase_auth
 from kiro.supabase_auth.http import register_exception_handlers
 from kiro.routes_user import router as user_router
+from kiro.assessment.router import router as assessment_router
+from kiro.assessment.exceptions import AssessmentError
 
 
 # --- Loguru Configuration ---
@@ -634,6 +636,17 @@ app.include_router(anthropic_router)
 # 503 AUTH_BACKEND_UNAVAILABLE (never a misleading 401) — the documented fallback
 # to conditional mounting (plan §1.5).
 app.include_router(user_router)
+app.include_router(assessment_router)
+
+
+@app.exception_handler(AssessmentError)
+async def handle_assessment_error(request, exc: AssessmentError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
 
 
 # --- Uvicorn log config ---
