@@ -27,16 +27,26 @@ dependency deliberately raise typed exceptions and perform NO HTTP mapping
 here so the policy lives in one auditable place and every protected route gets an
 identical body/header shape.
 
-Decision matrix (plan §2/§3, resolved UD-1/UD-4):
+Decision matrix (M7 §2/§3 + M8a §9, resolved UD-1/UD-4):
 
-    exception                status  code                       extra headers
-    ---------------------------------------------------------------------------
-    TokenExpiredError        401     TOKEN_EXPIRED              WWW-Authenticate
-    InvalidIdentityError     401     INVALID_TOKEN             WWW-Authenticate
-    InvalidTokenError        401     INVALID_TOKEN             WWW-Authenticate
-    AuthRateLimitedError     429     RATE_LIMITED              Retry-After
-    JwksUnavailableError     503     AUTH_BACKEND_UNAVAILABLE  Retry-After
-    SupabaseAuthError (base) 401     INVALID_TOKEN             WWW-Authenticate
+    exception                  status  code                       extra headers
+    -----------------------------------------------------------------------------
+    TokenExpiredError          401     TOKEN_EXPIRED              WWW-Authenticate
+    InvalidIdentityError       401     INVALID_TOKEN             WWW-Authenticate
+    InvalidTokenError          401     INVALID_TOKEN             WWW-Authenticate
+    AuthRateLimitedError       429     RATE_LIMITED              Retry-After
+    JwksUnavailableError       503     AUTH_BACKEND_UNAVAILABLE  Retry-After
+    OnboardingRequiredError    403     ONBOARDING_REQUIRED       (none)            [M8a]
+    SupabaseAuthzError         403     ACCOUNT_DISABLED          (none)            [M8a]
+      (banned/deleted/unknown collapse to one code+message — no disclosure)
+    UserStateUnavailableError  503     AUTH_BACKEND_UNAVAILABLE  Retry-After       [M8a]
+    ProfileUnavailableError    500     INTERNAL                  (none)            [M8a]
+    SupabaseAuthError (base)   401     INVALID_TOKEN             WWW-Authenticate
+
+The authz branches (403) are placed BEFORE the base 401 fallback so authorization
+failures never collapse into a 401 (PhaseC §7.1: 401-vs-403 discipline, never
+crossed). 403 carries NO WWW-Authenticate (the credential was valid; re-auth does
+not help).
 
 Disclosure discipline (plan §11; mirrors the verifier's generic-collapse):
   - The handler maps on the exception *type* only. It NEVER reads ``exc.detail``
@@ -70,22 +80,30 @@ from .context import get_request_id
 from .exceptions import (
     AuthRateLimitedError,
     JwksUnavailableError,
+    OnboardingRequiredError,
+    ProfileUnavailableError,
     SupabaseAuthError,
+    SupabaseAuthzError,
     TokenExpiredError,
+    UserStateUnavailableError,
 )
 
 # --- Machine-readable codes (plan §2). -------------------------------------- #
-# Authentication codes M7-now emits:
+# Authentication codes (M7):
 CODE_TOKEN_EXPIRED = "TOKEN_EXPIRED"
 CODE_INVALID_TOKEN = "INVALID_TOKEN"
 CODE_RATE_LIMITED = "RATE_LIMITED"
 CODE_AUTH_BACKEND_UNAVAILABLE = "AUTH_BACKEND_UNAVAILABLE"
 
-# RESERVED authorization codes — defined so the deferred authz milestone has a
-# stable home, but NOT emitted by any M7-now path (no role/user-state exists).
-CODE_ONBOARDING_REQUIRED = "ONBOARDING_REQUIRED"   # reserved (403)
-CODE_ACCOUNT_DISABLED = "ACCOUNT_DISABLED"         # reserved (403)
-CODE_FORBIDDEN = "FORBIDDEN"                        # reserved (403)
+# Authorization codes — defined reserved in M7; ACTIVATED in M8a (the authz
+# family now emits ACCOUNT_DISABLED / ONBOARDING_REQUIRED). FORBIDDEN stays
+# reserved-not-emitted (roles / M8b are deferred).
+CODE_ONBOARDING_REQUIRED = "ONBOARDING_REQUIRED"   # 403 (M8a)
+CODE_ACCOUNT_DISABLED = "ACCOUNT_DISABLED"         # 403 (M8a)
+CODE_FORBIDDEN = "FORBIDDEN"                        # reserved (403) — M8b roles, not emitted
+
+# Server-fault code (M8a): a valid JWT with no profile row after retry (D4).
+CODE_INTERNAL = "INTERNAL"                          # 500 (M8a)
 
 # --- Fixed, generic client messages (never derived from exc.detail). -------- #
 # Identical for every invalid-token cause (disclosure rule); only expiry differs.
@@ -93,6 +111,11 @@ _MSG_TOKEN_EXPIRED = "Token expired."
 _MSG_INVALID_TOKEN = "Authentication failed."
 _MSG_RATE_LIMITED = "Too many authentication attempts."
 _MSG_BACKEND_UNAVAILABLE = "Authentication is temporarily unavailable."
+# Authz/server messages (M8a). ACCOUNT_DISABLED is the collapsed bucket for
+# banned/deleted/indeterminate — the client never learns which (disclosure rule).
+_MSG_ACCOUNT_DISABLED = "Account is not available."
+_MSG_ONBOARDING_REQUIRED = "Onboarding is required."
+_MSG_INTERNAL = "Internal server error."
 
 # Retry-After seconds. Throttle = the auth-failure window (bootstrap.py = 60s);
 # JWKS = a short back-off (the cache serves stale within its grace window).
@@ -149,6 +172,47 @@ def _resolve(exc: SupabaseAuthError) -> _Mapping:
             message=_MSG_BACKEND_UNAVAILABLE,
             headers={"Retry-After": _RETRY_AFTER_JWKS},
         )
+
+    # --- M8a authorization branches (BEFORE the 401 fallback). --------------- #
+    # The authz family means authentication PASSED; these are 403, NOT 401
+    # (PhaseC §7.1, never crossed). 403 carries NO WWW-Authenticate — the
+    # credential was fine, so re-auth would not help.
+    if isinstance(exc, OnboardingRequiredError):
+        # The one authz distinction surfaced (tells the client what to do).
+        return _Mapping(
+            status=403,
+            code=CODE_ONBOARDING_REQUIRED,
+            message=_MSG_ONBOARDING_REQUIRED,
+            headers={},
+        )
+    if isinstance(exc, SupabaseAuthzError):
+        # Banned / deleted / indeterminate (fail-closed) collapse to ONE code +
+        # message — the client never learns which (disclosure rule, §9.3).
+        return _Mapping(
+            status=403,
+            code=CODE_ACCOUNT_DISABLED,
+            message=_MSG_ACCOUNT_DISABLED,
+            headers={},
+        )
+    if isinstance(exc, UserStateUnavailableError):
+        # Transient state-read failure (D5): 503 + Retry-After. Fail-closed
+        # (the request was rejected, not granted), retryable.
+        return _Mapping(
+            status=503,
+            code=CODE_AUTH_BACKEND_UNAVAILABLE,
+            message=_MSG_BACKEND_UNAVAILABLE,
+            headers={"Retry-After": _RETRY_AFTER_JWKS},
+        )
+    if isinstance(exc, ProfileUnavailableError):
+        # Valid JWT, no profile row after retry (D4): server fault → 500. Generic
+        # message; the specific reason stays in the server log only.
+        return _Mapping(
+            status=500,
+            code=CODE_INTERNAL,
+            message=_MSG_INTERNAL,
+            headers={},
+        )
+
     # Base fallback: InvalidTokenError, InvalidIdentityError, and any future
     # SupabaseAuthError subtype that lacks its own branch → generic 401.
     return _Mapping(

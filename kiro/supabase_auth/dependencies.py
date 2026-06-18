@@ -49,6 +49,7 @@ throttling or be recorded as fact). A trusted-proxy rule can be added later.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import Request
@@ -59,13 +60,24 @@ from .exceptions import (
     AuthRateLimitedError,
     InvalidTokenError,
     JwksUnavailableError,
+    OnboardingRequiredError,
+    ProfileUnavailableError,
     SupabaseAuthError,
+    SupabaseAuthzError,
 )
+from .profile import UserProfile
 from .user import AuthenticatedUser, build_authenticated_user
+from .user_state import enforce_active
 
 # Bucket for requests with no determinable client IP — they share one budget
 # (conservative: an unknown-IP flood is throttled together rather than exempt).
 _UNKNOWN_IP = "unknown"
+
+# Bounded missing-profile retry (M8a / D4): a valid JWT with no public.users row
+# is almost always trigger-lag right after signup. Retry ONCE after a short delay
+# before treating it as a server fault (ProfileUnavailableError → 500). Never a
+# lazy-provision.
+_PROFILE_RETRY_DELAY_SECONDS = 0.25
 
 
 def _client_ip(request: Request) -> str:
@@ -216,3 +228,108 @@ async def get_optional_user(request: Request) -> Optional[AuthenticatedUser]:
         return await get_current_user(request)
     except SupabaseAuthError:
         return None
+
+
+# ==================================================================================================
+# M8a — Authorization layering (READ 1 state gate → READ 2 profile body → onboarding gate).
+# Each dependency calls the one below it and adds exactly one check, raising typed
+# authz/server errors only (HTTP mapping is http.py). See M8AuthorizationPlanV3 §7.1.
+# ==================================================================================================
+
+
+def _audit_authz_denied(request: Request, bundle, user_id: str) -> None:
+    """
+    Emit a best-effort ``AUTHZ_DENIED`` audit row at an authorization gate.
+
+    The subject is known here (the request authenticated), so ``user_id`` is
+    recorded. Fire-and-forget; never blocks or fails the request (M5 best-effort).
+    Called only on a 403 authz denial — NOT for server faults (500) or transient
+    read failures (503), which are not authorization decisions (V3 §10).
+    """
+    bundle.audit_logger.record(
+        AuditEvent.AUTHZ_DENIED,
+        user_id=user_id,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+        request_id=get_request_id(),
+    )
+
+
+async def get_auth_state(request: Request) -> AuthenticatedUser:
+    """
+    Authorization enforcement dependency (M8a READ 1).
+
+    Authenticates (via :func:`require_supabase_user` — 401 family, or 503 if the
+    backend is dormant), then performs the AUTHORITATIVE, RLS-bypassing state read
+    and enforces it fail-closed. Returns the :class:`AuthenticatedUser` when the
+    request may proceed (state is ACTIVE); otherwise raises a typed error that M8's
+    handler maps:
+      - deleted / banned / indeterminate → 403 (``SupabaseAuthzError`` family),
+        and one best-effort ``AUTHZ_DENIED`` audit row is emitted at this gate;
+      - missing ``public.users`` row (after one bounded retry — D4) → 500
+        (``ProfileUnavailableError``), NOT audited as a denial (it is a server
+        fault);
+      - transient state-read failure → 503 (``UserStateUnavailableError``), NOT
+        audited and NEVER fail-open.
+
+    Endpoints that only need "is this user allowed?" depend on this directly,
+    without paying for the profile-body read. Also stashes the resolved
+    ``AuthState`` on ``request.state.auth_state`` for handlers that want it.
+    """
+    user = await require_supabase_user(request)
+    bundle = request.app.state.supabase_auth  # non-None (require_supabase_user checked)
+
+    # READ 1, with the single bounded missing-profile retry (D4): a brand-new
+    # signup may briefly precede its handle_new_user-trigger row.
+    auth_state = await bundle.state_reader.read_auth_state(user.user_id)
+    if not auth_state.row_exists:
+        await asyncio.sleep(_PROFILE_RETRY_DELAY_SECONDS)
+        auth_state = await bundle.state_reader.read_auth_state(user.user_id)
+
+    try:
+        enforce_active(auth_state)
+    except SupabaseAuthzError:
+        # 403 authorization denial → audit at the gate, then re-raise unchanged.
+        _audit_authz_denied(request, bundle, user.user_id)
+        raise
+    # ProfileUnavailableError (500) / UserStateUnavailableError (503) propagate
+    # un-audited: they are a server fault / a transient failure, not a denial.
+
+    request.state.auth_state = auth_state
+    return user
+
+
+async def get_current_user_profile(request: Request) -> UserProfile:
+    """
+    Profile-body dependency (M8a READ 2).
+
+    Depends on :func:`get_auth_state`, so enforcement has already passed and the
+    user is ACTIVE. Reads the profile body over the user-scoped, RLS-respecting
+    connection and returns a :class:`UserProfile`. Stashes it on
+    ``request.state.profile``. Raises :class:`ProfileUnavailableError` (→ 500) if
+    the active user's row is unexpectedly unreadable.
+    """
+    user = await get_auth_state(request)
+    bundle = request.app.state.supabase_auth
+    profile = await bundle.profile_reader.fetch_profile(user.user_id)
+    request.state.profile = profile
+    return profile
+
+
+async def require_onboarded(request: Request) -> UserProfile:
+    """
+    Onboarding gate (M8a).
+
+    Depends on :func:`get_current_user_profile` (active user + body). If onboarding
+    is not complete, raises :class:`OnboardingRequiredError` (→ 403
+    ``ONBOARDING_REQUIRED``) and emits a best-effort ``AUTHZ_DENIED`` audit row.
+    Returns the :class:`UserProfile` when onboarded.
+    """
+    profile = await get_current_user_profile(request)
+    if not profile.onboarding_completed:
+        bundle = request.app.state.supabase_auth
+        _audit_authz_denied(request, bundle, profile.user_id)
+        raise OnboardingRequiredError(
+            "Onboarding is required.", detail="onboarding_completed is false"
+        )
+    return profile

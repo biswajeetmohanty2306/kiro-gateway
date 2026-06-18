@@ -18,21 +18,26 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-Service-role Postgres pool adapter for audit writes (milestone M6).
+Service-role Postgres pool adapter for privileged Phase C DB access (M6 + M8a).
 
 Provides the ``ConnectionAcquirer`` that M5's ``AuditLogger`` consumes — backed
-by an ``asyncpg`` connection pool built from ``SUPABASE_DB_URL``. This is the
-ONLY DB connection M6 introduces, and it exists solely for audit inserts that
-must bypass RLS (the ``auth_audit_log`` table has no client access — M5-D4,
-M5-D1). It is NOT a general-purpose service-role escape hatch; profile/
-onboarding reads (a later milestone) use a separate RLS-respecting path.
+by an ``asyncpg`` connection pool built from ``SUPABASE_DB_URL``. As of M8a the
+SAME privileged pool also backs the authoritative user-state read
+(``state_read.py``): the deployed RLS (`auth.uid()=user_id AND deleted_at IS
+NULL`) and the policy-free ``auth`` schema mean a user-scoped connection can read
+neither ``deleted_at`` nor ``auth.users.banned_until``, so authorization state
+must come from this RLS-bypassing connection (M8AuthorizationPlanV3 §5.1,
+Option A). It remains NOT a general-purpose escape hatch: each consumer
+(``AuditLogger``, ``StateReader``) exposes exactly one narrow, parameterized,
+``user_id``-keyed operation; profile-BODY reads use a separate RLS-respecting
+path (a sibling concern), never this pool.
 
 Design constraints:
   - NO top-level ``asyncpg`` import. The driver is imported lazily inside
     :func:`build_audit_pool` so this module — and the whole ``supabase_auth``
     package — imports cleanly in environments where ``asyncpg`` is not installed
     (e.g. the unit-test environment). The package only needs the driver when a
-    DB-backed audit pool is actually built at startup.
+    DB-backed pool is actually built at startup.
   - INJECTABLE pool factory so the builder is unit-testable without a live
     database (or the driver) — tests pass a fake factory.
   - Small pool + bounded command timeout: audit is low-volume and best-effort;
@@ -40,8 +45,9 @@ Design constraints:
 
 The returned :class:`AuditConnectionPool` satisfies M5's ``ConnectionAcquirer``
 protocol: ``acquire()`` returns an async context manager yielding a connection
-whose ``execute(sql, *args)`` runs the parameterized audit insert. An
-``asyncpg`` connection provides exactly that surface.
+whose ``execute(sql, *args)`` runs the parameterized audit insert and whose
+``fetchrow(sql, *args)`` runs the parameterized M8a state read. An ``asyncpg``
+connection provides exactly that surface.
 """
 
 from __future__ import annotations
@@ -126,3 +132,13 @@ async def build_audit_pool(
         command_timeout=command_timeout,
     )
     return AuditConnectionPool(pool)
+
+
+# --- M8a aliases ----------------------------------------------------------- #
+# The privileged pool backs BOTH audit writes (M5/M6) and the authoritative
+# user-state read (M8a). These aliases let state-read code depend on an
+# intent-revealing name without a second pool or a second DB connection
+# (Option A: reuse the existing privileged connection). The audit names above are
+# unchanged so M5/M6 call sites and their tests are untouched.
+PrivilegedConnectionPool = AuditConnectionPool
+build_privileged_pool = build_audit_pool

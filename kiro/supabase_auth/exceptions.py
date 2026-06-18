@@ -36,7 +36,14 @@ Hierarchy::
     ├── InvalidTokenError             → 401 / INVALID_TOKEN  (generic bucket)   [M7]
     ├── TokenExpiredError             → 401 / TOKEN_EXPIRED   (safe distinction) [M7]
     ├── AuthRateLimitedError          → 429 / RATE_LIMITED + Retry-After (UD-1)  [M7]
-    └── JwksUnavailableError          → 503 / transient       (D5)              [M7]
+    ├── JwksUnavailableError          → 503 / transient       (D5)              [M7]
+    ├── SupabaseAuthzError            (authorization base; → 403)               [M8a]
+    │   ├── AccountDisabledError      → 403 / ACCOUNT_DISABLED (fail-closed)     [M8a]
+    │   ├── UserBannedError           → 403 / ACCOUNT_DISABLED                   [M8a]
+    │   ├── UserDeletedError          → 403 / ACCOUNT_DISABLED                   [M8a]
+    │   └── OnboardingRequiredError   → 403 / ONBOARDING_REQUIRED                [M8a]
+    ├── ProfileUnavailableError       → 500 / server fault    (D4)              [M8a]
+    └── UserStateUnavailableError     → 503 / transient        (D5)             [M8a]
 
 Note: configuration problems use ``SupabaseAuthConfigError`` (defined in
 ``kiro/supabase_auth/config.py``) — that is a startup/config concern, distinct
@@ -105,5 +112,90 @@ class AuthRateLimitedError(SupabaseAuthError):
     misleading 401 (UD-1 → R1). Like the base, it carries a secret-free ``detail``
     for server logs and performs NO HTTP mapping (M7's job). The throttle path is
     deliberately NOT audited (avoid amplifying abuse into background DB writes).
+    """
+
+
+# ==================================================================================================
+# M8a — Authorization error family (authentication PASSED; the request is denied
+# on durable, DB-sourced user state). See M8AuthorizationPlanV3 §9.
+# ==================================================================================================
+#
+# Hierarchy (M8a)::
+#
+#     SupabaseAuthError
+#     ├── SupabaseAuthzError                 (authorization, NOT authentication)
+#     │   ├── AccountDisabledError           → 403 ACCOUNT_DISABLED  (fail-closed/unknown bucket)
+#     │   ├── UserBannedError                → 403 ACCOUNT_DISABLED
+#     │   ├── UserDeletedError               → 403 ACCOUNT_DISABLED
+#     │   └── OnboardingRequiredError        → 403 ONBOARDING_REQUIRED
+#     ├── ProfileUnavailableError            → 500 (server fault, D4 — NOT authz)
+#     └── UserStateUnavailableError          → 503 (transient state-read failure, D5)
+#
+# The intermediate ``SupabaseAuthzError`` makes the 401-vs-403 discipline
+# (PhaseC §7.1) STRUCTURAL: M7's handler default is 401, so M8's handler maps the
+# authz family to 403 via explicit branches placed BEFORE the 401 fallback (§9.5).
+# These are still typed exceptions carrying a secret-free ``detail`` for logs and
+# performing NO HTTP mapping themselves.
+
+
+class SupabaseAuthzError(SupabaseAuthError):
+    """
+    Base for AUTHORIZATION failures — the request authenticated successfully
+    (identity is established) but is not permitted to proceed on durable user
+    state. Distinct from the authentication errors above so the M8 HTTP handler
+    can map this whole branch to 403 (never 401 — PhaseC §7.1). Never raised
+    directly; a concrete subtype is always used.
+    """
+
+
+class AccountDisabledError(SupabaseAuthzError):
+    """
+    The account may not proceed and the precise reason is deliberately NOT
+    distinguished to the client — the generic / fail-closed bucket. Raised for an
+    indeterminate or unrecognized ``UserState`` (fail closed, M4-D4). Maps to 403 /
+    ``ACCOUNT_DISABLED`` at M8; the granular reason stays in the server log only.
+    """
+
+
+class UserBannedError(SupabaseAuthzError):
+    """
+    The user is banned (``auth.users.banned_until`` is in the future). Maps to 403
+    / ``ACCOUNT_DISABLED`` at M8 — collapsed with disabled/deleted so the client
+    cannot tell banned from deleted (disclosure rule, §9.3).
+    """
+
+
+class UserDeletedError(SupabaseAuthzError):
+    """
+    The user is soft-deleted (``public.users.deleted_at`` is set). Maps to 403 /
+    ``ACCOUNT_DISABLED`` at M8 (collapsed with banned/disabled).
+    """
+
+
+class OnboardingRequiredError(SupabaseAuthzError):
+    """
+    The user is active but has not completed onboarding, and the route requires it
+    (``require_onboarded``). Maps to 403 / ``ONBOARDING_REQUIRED`` at M8 — the one
+    authz distinction that IS surfaced, because it tells the client what to do.
+    """
+
+
+class ProfileUnavailableError(SupabaseAuthError):
+    """
+    A valid JWT resolved to NO ``public.users`` row even after the bounded retry —
+    a server-side fault (the Phase A ``handle_new_user`` trigger contract is
+    broken), NOT a client/credential error and NOT an authorization decision
+    (D4). Maps to 500 at M8 with an alert-worthy server log. Never triggers a
+    lazy-provision.
+    """
+
+
+class UserStateUnavailableError(SupabaseAuthError):
+    """
+    The authoritative user-state read failed transiently (DB down/timeout/pool
+    exhausted). A SERVER dependency failure, not an authorization verdict — kept
+    distinct so M8 maps it to 503 (back off and retry), NOT 403. Crucially this
+    FAILS CLOSED: the request is still rejected (never fail-open), just with a
+    retryable status. Decision D5.
     """
 

@@ -18,24 +18,29 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-User-facing protected routes for Phase C (milestone M7).
+User-facing protected routes for Phase C (milestones M7 + M8a).
 
 The Supabase user-auth surface, mounted alongside the existing ``/v1`` proxy
 routes but on a DISJOINT path namespace (``/auth/*``). These routes are guarded
-by :func:`require_supabase_user` (a verified Supabase user JWT), entirely separate
-from the ``PROXY_API_KEY`` guard on ``/v1`` — the two auth planes never mix
-(plan §1.2/§9; a user JWT never reaches the Kiro API).
+by Supabase user-JWT dependencies, entirely separate from the ``PROXY_API_KEY``
+guard on ``/v1`` — the two auth planes never mix (plan §1.2/§9; a user JWT never
+reaches the Kiro API).
 
-Only the TOKEN-ONLY routes are implemented here. Profile-enriched ``/auth/me``,
-onboarding, role gates, and any ``403`` (banned/inactive/ONBOARDING_REQUIRED) are
-the DEFERRED authorization milestone — no user-state schema or role claim exists
-in-repo, so M7 builds none of it (plan §0.0/§12).
+Routes by enforcement layer:
+  - ``GET  /auth/me``        — token-only (M7): identity echo, no DB read.
+  - ``POST /auth/logout``    — token-only (M7): audit-only logout, 204.
+  - ``GET  /auth/profile``   — profile-backed (M8a): runs the authoritative state
+        gate then the user-scoped body read. This is where a deleted/banned user
+        is caught (403 ACCOUNT_DISABLED) — the S1 enforcement surface.
+  - ``POST /auth/onboarding``— state-gated (M8a): requires an ACTIVE user (NOT
+        ``require_onboarded`` — you must reach it while un-onboarded, PhaseC §6.2);
+        atomic conditional transition, idempotent, best-effort audit.
 
-S4 revocation-window note (plan §1.4; PhaseC §5): every route here is token-only
-(no DB read). It accepts a valid JWT for the remaining lifetime of that token and
-CANNOT observe a mid-TTL ban/disable. This is the explicitly-accepted revocation
-window (~1h Supabase default). A ban is caught only on the next DB-touch by a
-profile-backed endpoint — which is deferred.
+S4 revocation-window note (PhaseC §5): ``/auth/me`` and ``/auth/logout`` are
+token-only — they accept a valid JWT for its remaining lifetime and CANNOT observe
+a mid-TTL ban/disable. The profile-backed routes (``/auth/profile``,
+``/auth/onboarding``) run the DB-sourced state gate and ARE the enforcement point.
+Roles / ``require_role`` remain deferred (M8b — no RBAC design exists).
 """
 
 from __future__ import annotations
@@ -44,7 +49,14 @@ from fastapi import APIRouter, Depends, Request, Response
 
 from .supabase_auth.audit import AuditEvent
 from .supabase_auth.context import get_request_id
-from .supabase_auth.dependencies import _client_ip, require_supabase_user
+from .supabase_auth.dependencies import (
+    _client_ip,
+    get_auth_state,
+    get_current_user_profile,
+    require_supabase_user,
+)
+from .supabase_auth.onboarding import complete_onboarding
+from .supabase_auth.profile import UserProfile
 from .supabase_auth.user import AuthenticatedUser
 
 router = APIRouter(tags=["User Auth"])
@@ -100,3 +112,68 @@ async def auth_logout(
             request_id=get_request_id(),
         )
     return Response(status_code=204)
+
+
+@router.get("/auth/profile")
+async def auth_profile(
+    profile: UserProfile = Depends(get_current_user_profile),
+) -> dict:
+    """
+    Return the authenticated, ACTIVE user's profile body (M8a — profile-backed).
+
+    Enforcement happens in the dependency chain: ``get_current_user_profile`` runs
+    the authoritative state gate (``get_auth_state``) first, so a deleted/banned
+    user is rejected with ``403 ACCOUNT_DISABLED`` BEFORE this handler runs — this
+    is the S1 enforcement surface. Only ACTIVE users reach here.
+
+    Returns the display fields + onboarding flag. Never the raw token, never the
+    authorization-state internals (``deleted_at``/``banned_until`` are not exposed).
+    """
+    return {
+        "user_id": profile.user_id,
+        "email": profile.email,
+        "name": profile.name,
+        "gender": profile.gender,
+        "birth_date": profile.birth_date.isoformat()
+        if profile.birth_date is not None and hasattr(profile.birth_date, "isoformat")
+        else profile.birth_date,
+        "country": profile.country,
+        "onboarding_completed": profile.onboarding_completed,
+    }
+
+
+@router.post("/auth/onboarding")
+async def auth_onboarding(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_auth_state),
+) -> dict:
+    """
+    Complete onboarding for the authenticated, ACTIVE user (M8a).
+
+    Depends on ``get_auth_state`` (must be ACTIVE) — deliberately NOT
+    ``require_onboarded``, because an un-onboarded user must be able to reach this
+    route to onboard (PhaseC §6.2). Performs the atomic conditional ``false→true``
+    transition (A3); a re-submit when already onboarded is a benign idempotent
+    no-op returning ``200`` with current state (D8), NOT a 409.
+
+    On a real ``false→true`` transition, emits one best-effort
+    ``AuditEvent.ONBOARDING_COMPLETED`` row (NOT on an idempotent no-op) — the audit
+    is fire-and-forget, OUTSIDE the DB transition, so a failed audit never rolls
+    back a completed onboarding (M5 §6).
+    """
+    bundle = request.app.state.supabase_auth  # non-None: get_auth_state authenticated
+    # The privileged acquirer (the same pool the readers use). The onboarding
+    # transition runs as the 'authenticated' role inside its own transaction so
+    # users_update_own RLS applies (see onboarding.py).
+    result = await complete_onboarding(bundle._audit_pool, user.user_id)
+
+    if result.transitioned:
+        bundle.audit_logger.record(
+            AuditEvent.ONBOARDING_COMPLETED,
+            user_id=user.user_id,
+            ip_address=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            request_id=get_request_id(),
+        )
+
+    return {"onboarding_completed": result.onboarding_completed}

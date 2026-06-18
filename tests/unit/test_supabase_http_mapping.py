@@ -29,13 +29,22 @@ from kiro.supabase_auth.http import (
     CODE_INVALID_TOKEN,
     CODE_RATE_LIMITED,
     CODE_AUTH_BACKEND_UNAVAILABLE,
+    CODE_ACCOUNT_DISABLED,
+    CODE_ONBOARDING_REQUIRED,
+    CODE_INTERNAL,
 )
 from kiro.supabase_auth.exceptions import (
+    AccountDisabledError,
     AuthRateLimitedError,
     InvalidTokenError,
     JwksUnavailableError,
+    OnboardingRequiredError,
+    ProfileUnavailableError,
     SupabaseAuthError,
     TokenExpiredError,
+    UserBannedError,
+    UserDeletedError,
+    UserStateUnavailableError,
 )
 from kiro.supabase_auth.user import InvalidIdentityError
 
@@ -83,6 +92,46 @@ class TestResolveMatrix:
         m = _resolve(SupabaseAuthError("e", detail="x"))
         assert m.status == 401
         assert m.code == CODE_INVALID_TOKEN
+
+
+class TestResolveAuthzMatrix:
+    """M8a authz branches — 403 (no WWW-Authenticate), 500, 503; before the 401 fallback."""
+
+    @pytest.mark.parametrize("exc", [
+        AccountDisabledError("e", detail="unknown"),
+        UserBannedError("e", detail="banned_until future"),
+        UserDeletedError("e", detail="deleted_at set"),
+    ])
+    def test_disabled_family_collapses_to_account_disabled(self, exc):
+        m = _resolve(exc)
+        assert m.status == 403
+        assert m.code == CODE_ACCOUNT_DISABLED
+        # 403 carries NO WWW-Authenticate (credential was fine; re-auth won't help).
+        assert "WWW-Authenticate" not in m.headers
+
+    def test_onboarding_required(self):
+        m = _resolve(OnboardingRequiredError("e", detail="not onboarded"))
+        assert m.status == 403
+        assert m.code == CODE_ONBOARDING_REQUIRED
+        assert "WWW-Authenticate" not in m.headers
+
+    def test_onboarding_required_checked_before_generic_authz(self):
+        # OnboardingRequiredError is a SupabaseAuthzError subtype; it must keep its
+        # own ONBOARDING_REQUIRED code, not collapse to ACCOUNT_DISABLED.
+        assert _resolve(OnboardingRequiredError("e")).code == CODE_ONBOARDING_REQUIRED
+
+    def test_profile_unavailable_is_500(self):
+        m = _resolve(ProfileUnavailableError("e", detail="no row"))
+        assert m.status == 500
+        assert m.code == CODE_INTERNAL
+        assert "WWW-Authenticate" not in m.headers
+
+    def test_user_state_unavailable_is_503(self):
+        m = _resolve(UserStateUnavailableError("e", detail="db down"))
+        assert m.status == 503
+        assert m.code == CODE_AUTH_BACKEND_UNAVAILABLE
+        assert "Retry-After" in m.headers
+        assert "WWW-Authenticate" not in m.headers
 
 
 # --------------------------------------------------------------------------- #

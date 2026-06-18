@@ -54,7 +54,9 @@ from .audit import AuditLogger
 from .config import SupabaseAuthConfig, SupabaseAuthConfigError, get_config
 from .db import build_audit_pool
 from .jwks_cache import JwksCache
+from .profile import ProfileReader
 from .ratelimit import FixedWindowRateLimiter
+from .state_read import StateReader
 from .verifier import JwtVerifier
 
 # Rate-limiter window for the auth-failure throttle (M3). The config carries the
@@ -83,6 +85,8 @@ class SupabaseAuthBundle:
     verifier: JwtVerifier
     rate_limiter: FixedWindowRateLimiter
     audit_logger: AuditLogger
+    state_reader: StateReader
+    profile_reader: ProfileReader
     _jwks_client: httpx.AsyncClient
     _audit_pool: Optional[Any] = None  # AuditConnectionPool | None
 
@@ -160,6 +164,16 @@ async def build_supabase_auth(
         # 5. Audit: DB-backed when db_url is set, else dormant (AuditLogger(None)).
         audit_pool = await audit_pool_builder(config.db_url)
         audit_logger = AuditLogger(audit_pool)
+
+        # 6. M8a authorization readers, both backed by the SAME privileged pool
+        #    (Option A — reuse the existing privileged connection; no second DB
+        #    URL). The state reader uses it RLS-bypassing (authoritative READ 1);
+        #    the profile reader uses it but its per-request transaction drops to
+        #    the 'authenticated' role so RLS applies (RLS-confined READ 2). When
+        #    db_url is unset, audit_pool is None → both readers fail closed
+        #    (state read → 503; profile read → 500), never fail-open.
+        state_reader = StateReader(audit_pool)
+        profile_reader = ProfileReader(audit_pool)
     except Exception:
         # Construction failed (e.g. DB pool connect error). Close the client we
         # created so a failed boot does not leak a connection, then re-raise to
@@ -179,6 +193,8 @@ async def build_supabase_auth(
         verifier=verifier,
         rate_limiter=rate_limiter,
         audit_logger=audit_logger,
+        state_reader=state_reader,
+        profile_reader=profile_reader,
         _jwks_client=client,
         _audit_pool=audit_pool,
     )
