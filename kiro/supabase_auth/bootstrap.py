@@ -130,11 +130,11 @@ async def build_supabase_auth(
     try:
         config = config_loader()
     except SupabaseAuthConfigError as exc:
-        logger.info(
-            "Phase C user-auth: not configured, skipping wiring ({})",
-            type(exc).__name__,
-        )
-        return None
+      logger.error(
+        "Phase C user-auth config error: {}",
+        str(exc),
+      )
+      return None
 
     # 2. The M2 verifier resolves keys via JWKS; an asymmetric config carries a
     #    jwks_url. Without one (symmetric scheme), the M2 verifier has no key
