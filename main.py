@@ -97,6 +97,8 @@ from kiro.assessment.router import router as assessment_router
 from kiro.assessment.exceptions import AssessmentError
 from kiro.partners.router import router as partners_router
 from kiro.partners.exceptions import PartnerError
+from kiro.compatibility.router import router as compatibility_router
+from kiro.compatibility.exceptions import CompatibilityError
 
 
 # --- Loguru Configuration ---
@@ -640,6 +642,7 @@ app.include_router(anthropic_router)
 app.include_router(user_router)
 app.include_router(assessment_router)
 app.include_router(partners_router)
+app.include_router(compatibility_router)
 
 
 @app.exception_handler(AssessmentError)
@@ -654,6 +657,16 @@ async def handle_assessment_error(request, exc: AssessmentError):
 
 @app.exception_handler(PartnerError)
 async def handle_partner_error(request, exc: PartnerError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+@app.exception_handler(CompatibilityError)
+async def handle_compatibility_error(request, exc: CompatibilityError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(
