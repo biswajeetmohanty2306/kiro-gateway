@@ -95,6 +95,8 @@ from kiro.supabase_auth.http import register_exception_handlers
 from kiro.routes_user import router as user_router
 from kiro.assessment.router import router as assessment_router
 from kiro.assessment.exceptions import AssessmentError
+from kiro.partners.router import router as partners_router
+from kiro.partners.exceptions import PartnerError
 
 
 # --- Loguru Configuration ---
@@ -637,10 +639,21 @@ app.include_router(anthropic_router)
 # to conditional mounting (plan §1.5).
 app.include_router(user_router)
 app.include_router(assessment_router)
+app.include_router(partners_router)
 
 
 @app.exception_handler(AssessmentError)
 async def handle_assessment_error(request, exc: AssessmentError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+@app.exception_handler(PartnerError)
+async def handle_partner_error(request, exc: PartnerError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(
