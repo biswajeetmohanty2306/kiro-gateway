@@ -99,6 +99,8 @@ from kiro.partners.router import router as partners_router
 from kiro.partners.exceptions import PartnerError
 from kiro.compatibility.router import router as compatibility_router
 from kiro.compatibility.exceptions import CompatibilityError
+from kiro.progress.router import router as progress_router
+from kiro.progress.exceptions import ProgressError
 
 
 # --- Loguru Configuration ---
@@ -643,6 +645,7 @@ app.include_router(user_router)
 app.include_router(assessment_router)
 app.include_router(partners_router)
 app.include_router(compatibility_router)
+app.include_router(progress_router)
 
 
 @app.exception_handler(AssessmentError)
@@ -667,6 +670,16 @@ async def handle_partner_error(request, exc: PartnerError):
 
 @app.exception_handler(CompatibilityError)
 async def handle_compatibility_error(request, exc: CompatibilityError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+@app.exception_handler(ProgressError)
+async def handle_progress_error(request, exc: ProgressError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(

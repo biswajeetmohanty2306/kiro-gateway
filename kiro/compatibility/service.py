@@ -283,7 +283,7 @@ async def complete_plan(pool: Any, user_id: str, plan_id: str) -> dict:
         # Verify the plan belongs to the user's partnership
         row = await conn.fetchrow(
             """
-            SELECT ip.id, ip.completed
+            SELECT ip.id, ip.completed, pc.id as connection_id
             FROM public.improvement_plans ip
             JOIN public.compatibility_reports cr ON cr.id = ip.report_id
             JOIN public.partner_connections pc ON pc.id = cr.connection_id
@@ -309,8 +309,19 @@ async def complete_plan(pool: Any, user_id: str, plan_id: str) -> dict:
             plan_id,
         )
 
-        return {
-            "id": str(updated["id"]),
-            "completed": updated["completed"],
-            "completed_at": updated["completed_at"].isoformat(),
-        }
+    # Fire progress tracking (non-raising)
+    try:
+        from ..progress.service import on_plan_completed
+        await on_plan_completed(
+            pool, user_id, plan_id,
+            connection_id=str(row["connection_id"]) if row["connection_id"] else None,
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Progress tracking failed for plan %s", plan_id)
+
+    return {
+        "id": str(updated["id"]),
+        "completed": updated["completed"],
+        "completed_at": updated["completed_at"].isoformat(),
+    }
