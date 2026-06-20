@@ -69,17 +69,53 @@ async def test_get_report_no_partner():
 
 @pytest.mark.asyncio
 async def test_get_report_not_generated():
-    """Returns has_report=False when connection exists but no report."""
+    """Returns has_report=False with reason 'not_generated' when both profiles exist but no report."""
     conn = MockConnection()
     pool = MockPool(conn)
     conn.fetchrow.side_effect = [
         {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},  # connection
         None,  # no report
+        {"id": "profile-b"},  # partner profile exists
+        {"id": "profile-a"},  # user profile exists
     ]
 
     result = await get_report(pool, "user-1")
     assert result["has_report"] is False
     assert result["reason"] == "not_generated"
+
+
+@pytest.mark.asyncio
+async def test_get_report_partner_no_profile():
+    """Returns reason 'partner_no_profile' when partner hasn't completed assessment."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+    conn.fetchrow.side_effect = [
+        {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},  # connection
+        None,  # no report
+        None,  # partner profile missing
+        {"id": "profile-a"},  # user profile exists
+    ]
+
+    result = await get_report(pool, "user-1")
+    assert result["has_report"] is False
+    assert result["reason"] == "partner_no_profile"
+
+
+@pytest.mark.asyncio
+async def test_get_report_user_no_profile():
+    """Returns reason 'user_no_profile' when user hasn't completed assessment."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+    conn.fetchrow.side_effect = [
+        {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},  # connection
+        None,  # no report
+        {"id": "profile-b"},  # partner profile exists
+        None,  # user profile missing
+    ]
+
+    result = await get_report(pool, "user-1")
+    assert result["has_report"] is False
+    assert result["reason"] == "user_no_profile"
 
 
 @pytest.mark.asyncio

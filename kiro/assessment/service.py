@@ -359,7 +359,22 @@ async def complete_assessment(
                 conn, user_id, assessment_id, scoring_result
             )
 
-    # Transaction committed successfully
+    # Transaction committed successfully — profile is persisted.
+    # Trigger auto-generation of compatibility report (non-raising).
+    from ..compatibility.triggers import try_generate_compatibility_report
+
+    async with pool.acquire() as conn:
+        connection = await conn.fetchrow(
+            """
+            SELECT id FROM public.partner_connections
+            WHERE (inviter_id = $1 OR invitee_id = $1) AND status = 'accepted'
+            LIMIT 1
+            """,
+            user_id,
+        )
+    if connection:
+        await try_generate_compatibility_report(pool, str(connection["id"]))
+
     return {
         "assessment_id": str(assessment_id),
         "status": "completed",

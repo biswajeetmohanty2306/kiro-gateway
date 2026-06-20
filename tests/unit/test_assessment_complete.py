@@ -152,6 +152,8 @@ async def test_complete_happy_path():
         {"completed_at": datetime(2026, 6, 18, 12, 15, 0, tzinfo=timezone.utc)},
         # Step 7: profile UPSERT RETURNING xmax
         {"xmax": 0},  # 0 = INSERT (new profile)
+        # F5E trigger: partner connection lookup (none found)
+        None,
     ]
     # Step 2: Fetch answers
     conn.fetch.return_value = answer_rows

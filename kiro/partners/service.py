@@ -150,10 +150,14 @@ async def accept_invite(pool: Any, user_id: str, invite_code: str) -> dict:
             invite["id"],
         )
 
-        return {
-            "connection_id": str(row["id"]),
-            "accepted_at": row["accepted_at"].isoformat(),
-        }
+    # Trigger auto-generation of compatibility report (non-raising, outside lock)
+    from ..compatibility.triggers import try_generate_compatibility_report
+    await try_generate_compatibility_report(pool, str(row["id"]))
+
+    return {
+        "connection_id": str(row["id"]),
+        "accepted_at": row["accepted_at"].isoformat(),
+    }
 
 
 async def get_status(pool: Any, user_id: str) -> dict:

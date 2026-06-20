@@ -52,6 +52,26 @@ async def get_report(pool: Any, user_id: str) -> dict:
         )
 
         if not report:
+            # Check if partner has a profile (to distinguish states)
+            inviter_id = str(connection["inviter_id"])
+            invitee_id = str(connection["invitee_id"])
+            partner_id = invitee_id if inviter_id == user_id else inviter_id
+
+            partner_profile = await conn.fetchrow(
+                "SELECT id FROM public.profiles WHERE user_id = $1",
+                partner_id,
+            )
+            user_profile = await conn.fetchrow(
+                "SELECT id FROM public.profiles WHERE user_id = $1",
+                user_id,
+            )
+
+            if not user_profile:
+                return {"has_report": False, "reason": "user_no_profile"}
+            if not partner_profile:
+                return {"has_report": False, "reason": "partner_no_profile"}
+            # Both profiles exist but no report — shouldn't happen with auto-gen,
+            # but allow manual generation as fallback
             return {"has_report": False, "reason": "not_generated"}
 
         # Parse dimension scores
