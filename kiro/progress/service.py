@@ -129,6 +129,7 @@ async def award_milestone(
     Award a milestone if not already earned. Returns True if newly awarded.
 
     Uses INSERT ... ON CONFLICT DO NOTHING for idempotency.
+    Creates a notification on successful award.
     """
     if milestone_key not in MILESTONES:
         logger.warning("Unknown milestone key: %s", milestone_key)
@@ -150,8 +151,15 @@ async def award_milestone(
             definition["description"],
             definition["icon"],
         )
-        # asyncpg returns "INSERT 0 1" on success, "INSERT 0 0" on conflict
-        return result == "INSERT 0 1"
+        newly_awarded = result == "INSERT 0 1"
+
+    if newly_awarded:
+        from .notifications import notify_milestone_unlocked
+        await notify_milestone_unlocked(
+            pool, user_id, milestone_key, definition["title"], definition["icon"]
+        )
+
+    return newly_awarded
 
 
 async def evaluate_milestones(
@@ -162,7 +170,7 @@ async def evaluate_milestones(
     """
     Evaluate which milestones the user qualifies for and award any new ones.
 
-    Returns a list of newly awarded milestone keys.
+    Checks all 15 milestones. Returns a list of newly awarded milestone keys.
     """
     awarded = []
 
@@ -173,6 +181,8 @@ async def evaluate_milestones(
             user_id,
         )
         earned_keys = {row["milestone_key"] for row in existing}
+
+        # --- Journey milestones ---
 
         # first_assessment: user has a completed assessment
         if "first_assessment" not in earned_keys:
@@ -215,20 +225,37 @@ async def evaluate_milestones(
                 if await award_milestone(pool, user_id, "first_report", connection_id):
                     awarded.append("first_report")
 
-        # first_plan_complete: user has at least 1 completed plan
+        # --- Plan completion progression ---
+
+        # first_plan_complete: 1+ plan_completed events
         if "first_plan_complete" not in earned_keys:
-            has_plan = await conn.fetchval(
-                """
-                SELECT EXISTS(
-                    SELECT 1 FROM public.progress_events
-                    WHERE user_id = $1 AND event_type = 'plan_completed'
-                )
-                """,
+            plan_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM public.progress_events WHERE user_id = $1 AND event_type = 'plan_completed'",
                 user_id,
             )
-            if has_plan:
+            if plan_count >= 1:
                 if await award_milestone(pool, user_id, "first_plan_complete", connection_id):
                     awarded.append("first_plan_complete")
+
+        # five_plans_complete: 5+ plan_completed events
+        if "five_plans_complete" not in earned_keys:
+            plan_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM public.progress_events WHERE user_id = $1 AND event_type = 'plan_completed'",
+                user_id,
+            )
+            if plan_count >= 5:
+                if await award_milestone(pool, user_id, "five_plans_complete", connection_id):
+                    awarded.append("five_plans_complete")
+
+        # ten_plans_complete: 10+ plan_completed events
+        if "ten_plans_complete" not in earned_keys:
+            plan_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM public.progress_events WHERE user_id = $1 AND event_type = 'plan_completed'",
+                user_id,
+            )
+            if plan_count >= 10:
+                if await award_milestone(pool, user_id, "ten_plans_complete", connection_id):
+                    awarded.append("ten_plans_complete")
 
         # all_plans_complete: all plans in current report are completed
         if "all_plans_complete" not in earned_keys:
@@ -249,15 +276,92 @@ async def evaluate_milestones(
                 if await award_milestone(pool, user_id, "all_plans_complete", connection_id):
                     awarded.append("all_plans_complete")
 
-        # seven_day_streak: current streak >= 7
-        if "seven_day_streak" not in earned_keys:
-            streak_row = await conn.fetchrow(
-                "SELECT current_streak FROM public.streaks WHERE user_id = $1",
+        # --- Streak ladder ---
+        streak_row = await conn.fetchrow(
+            "SELECT current_streak FROM public.streaks WHERE user_id = $1",
+            user_id,
+        )
+        current_streak = streak_row["current_streak"] if streak_row else 0
+
+        if "three_day_streak" not in earned_keys and current_streak >= 3:
+            if await award_milestone(pool, user_id, "three_day_streak", connection_id):
+                awarded.append("three_day_streak")
+
+        if "seven_day_streak" not in earned_keys and current_streak >= 7:
+            if await award_milestone(pool, user_id, "seven_day_streak", connection_id):
+                awarded.append("seven_day_streak")
+
+        if "fourteen_day_streak" not in earned_keys and current_streak >= 14:
+            if await award_milestone(pool, user_id, "fourteen_day_streak", connection_id):
+                awarded.append("fourteen_day_streak")
+
+        if "thirty_day_streak" not in earned_keys and current_streak >= 30:
+            if await award_milestone(pool, user_id, "thirty_day_streak", connection_id):
+                awarded.append("thirty_day_streak")
+
+        # --- Score-based milestones ---
+
+        # relationship_champion: overall compatibility score >= 80
+        if "relationship_champion" not in earned_keys:
+            score = await conn.fetchval(
+                """
+                SELECT cr.overall_score
+                FROM public.compatibility_reports cr
+                JOIN public.partner_connections pc ON pc.id = cr.connection_id
+                WHERE (pc.inviter_id = $1 OR pc.invitee_id = $1) AND pc.status = 'accepted'
+                LIMIT 1
+                """,
                 user_id,
             )
-            if streak_row and streak_row["current_streak"] >= 7:
-                if await award_milestone(pool, user_id, "seven_day_streak", connection_id):
-                    awarded.append("seven_day_streak")
+            if score is not None and float(score) >= 80:
+                if await award_milestone(pool, user_id, "relationship_champion", connection_id):
+                    awarded.append("relationship_champion")
+
+        # communication_master: communication dimension score >= 80
+        if "communication_master" not in earned_keys:
+            dim_scores_raw = await conn.fetchval(
+                """
+                SELECT cr.dimension_scores
+                FROM public.compatibility_reports cr
+                JOIN public.partner_connections pc ON pc.id = cr.connection_id
+                WHERE (pc.inviter_id = $1 OR pc.invitee_id = $1) AND pc.status = 'accepted'
+                LIMIT 1
+                """,
+                user_id,
+            )
+            if dim_scores_raw:
+                dim_scores = dim_scores_raw if isinstance(dim_scores_raw, dict) else json.loads(dim_scores_raw)
+                comm = dim_scores.get("communication_style", {})
+                comm_score = comm.get("score", 0) if isinstance(comm, dict) else 0
+                if comm_score >= 80:
+                    if await award_milestone(pool, user_id, "communication_master", connection_id):
+                        awarded.append("communication_master")
+
+        # --- Aggregate milestones ---
+
+        # consistency_star: activity in 4 consecutive weeks
+        if "consistency_star" not in earned_keys:
+            distinct_weeks = await conn.fetchval(
+                """
+                SELECT COUNT(DISTINCT date_trunc('week', created_at))
+                FROM public.progress_events
+                WHERE user_id = $1 AND created_at >= now() - interval '28 days'
+                """,
+                user_id,
+            )
+            if distinct_weeks >= 4:
+                if await award_milestone(pool, user_id, "consistency_star", connection_id):
+                    awarded.append("consistency_star")
+
+        # elite_partner: 500+ lifetime points
+        if "elite_partner" not in earned_keys:
+            lifetime_pts = await conn.fetchval(
+                "SELECT COALESCE(SUM(points), 0) FROM public.progress_events WHERE user_id = $1",
+                user_id,
+            )
+            if lifetime_pts >= 500:
+                if await award_milestone(pool, user_id, "elite_partner", connection_id):
+                    awarded.append("elite_partner")
 
     return awarded
 
@@ -271,7 +375,7 @@ async def on_plan_completed(
     """
     Hook called when an improvement plan is completed.
 
-    Records event, updates streak, evaluates milestones.
+    Records event, updates streak, evaluates milestones, updates weekly goals.
     Returns summary of what happened.
     """
     # 1. Record progress event
@@ -294,15 +398,27 @@ async def on_plan_completed(
             connection_id=connection_id,
             metadata={"streak_days": streak["current_streak"]},
         )
+        from .notifications import notify_streak_reached
+        await notify_streak_reached(pool, user_id, streak["current_streak"])
 
     # 4. Evaluate milestones
     new_milestones = await evaluate_milestones(pool, user_id, connection_id)
+
+    # 5. Update weekly goals
+    from .goals import update_weekly_goals_progress, complete_goal_rewards
+    newly_completed_goals = await update_weekly_goals_progress(
+        pool, user_id, EVENT_PLAN_COMPLETED, streak_days=streak["current_streak"]
+    )
+    goal_rewards = {"goals_completed": 0, "bonus_points": 0, "sweep_awarded": False}
+    if newly_completed_goals:
+        goal_rewards = await complete_goal_rewards(pool, user_id, newly_completed_goals, connection_id)
 
     return {
         "event_id": event_id,
         "points": POINTS_PLAN_COMPLETED,
         "streak": streak,
         "new_milestones": new_milestones,
+        "goal_rewards": goal_rewards,
     }
 
 

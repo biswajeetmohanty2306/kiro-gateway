@@ -161,4 +161,13 @@ async def _do_generate(pool: Any, connection_id: str) -> bool:
             connection_id,
             report_row["id"],
         )
-        return True
+
+    # Create health snapshots for both users (non-raising, outside main flow)
+    try:
+        from ..progress.trends import create_health_snapshot
+        await create_health_snapshot(pool, inviter_id, connection_id)
+        await create_health_snapshot(pool, invitee_id, connection_id)
+    except Exception:
+        logger.debug("Health snapshot creation failed (non-critical)")
+
+    return True

@@ -256,17 +256,23 @@ async def test_evaluate_milestones_awards_first_assessment():
 
     # No existing milestones
     conn.fetch.return_value = []
-    # first_assessment check: has completed assessment
+    # Queries for all milestone conditions:
     conn.fetchval.side_effect = [
         True,   # first_assessment: has completed
         False,  # first_partner: no partner
         False,  # first_report: no report
-        False,  # first_plan_complete: no plan events
-        False,  # all_plans_complete: not all done
+        0,      # first_plan_complete: count = 0
+        0,      # five_plans_complete: count = 0
+        0,      # ten_plans_complete: count = 0
+        False,  # all_plans_complete
+        None,   # relationship_champion: no score
+        None,   # communication_master: no dim_scores
+        0,      # consistency_star: 0 weeks
+        0,      # elite_partner: 0 points
     ]
-    # seven_day_streak check uses fetchrow
+    # streak ladder: fetchrow for streak
     conn.fetchrow.return_value = None  # no streak row
-    # award_milestone calls pool.acquire -> conn.execute
+    # award_milestone calls conn.execute
     conn.execute.return_value = "INSERT 0 1"
 
     awarded = await evaluate_milestones(pool, "user-1")
@@ -282,19 +288,22 @@ async def test_evaluate_milestones_skips_already_earned():
 
     # Already has first_assessment
     conn.fetch.return_value = [{"milestone_key": "first_assessment"}]
-    # first_partner check
     conn.fetchval.side_effect = [
         False,  # first_partner: no partner
         False,  # first_report: no report
-        False,  # first_plan_complete
+        0,      # first_plan_complete
+        0,      # five_plans_complete
+        0,      # ten_plans_complete
         False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        0,      # elite_partner
     ]
-    # seven_day_streak check uses fetchrow
     conn.fetchrow.return_value = None  # no streak row
 
     awarded = await evaluate_milestones(pool, "user-1")
 
-    # first_assessment was not re-evaluated
     assert "first_assessment" not in awarded
     assert awarded == []
 
@@ -310,14 +319,23 @@ async def test_evaluate_milestones_seven_day_streak():
         False,  # first_assessment
         False,  # first_partner
         False,  # first_report
-        False,  # first_plan_complete
+        0,      # first_plan_complete
+        0,      # five_plans_complete
+        0,      # ten_plans_complete
         False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        0,      # elite_partner
     ]
-    # seven_day_streak: fetchrow for streak
+    # streak fetchrow returns streak >= 7
     conn.fetchrow.return_value = {"current_streak": 7}
     conn.execute.return_value = "INSERT 0 1"
 
     awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "three_day_streak" in awarded
+    assert "seven_day_streak" in awarded
 
     assert "seven_day_streak" in awarded
 
@@ -332,21 +350,32 @@ async def test_on_plan_completed_records_event():
     conn = MockConnection()
     pool = MockPool(conn)
 
-    # record_progress_event: INSERT RETURNING
-    # update_streak: SELECT streak row
-    # evaluate_milestones: fetch existing milestones + fetchval checks
+    # fetchrow order: record_event, update_streak(None), [milestone award triggers notify→fetchrow],
+    #   then evaluate continues to streak check (fetchrow)
+    # Award order: first_plan_complete qualifies → award → notify (fetchrow) BEFORE streak check
     conn.fetchrow.side_effect = [
-        {"id": "event-1"},  # record_progress_event
-        None,               # update_streak: no existing streak
-        None,               # evaluate_milestones -> seven_day_streak fetchrow
+        {"id": "event-1"},   # record_progress_event
+        None,                # update_streak: no existing streak (INSERT)
+        {"id": "notif-1"},   # notify_milestone_unlocked for first_plan_complete (inside evaluate)
+        None,                # evaluate_milestones: streak row (after milestones awarded)
     ]
-    conn.fetch.return_value = []  # evaluate: no existing milestones
+    # fetch: evaluate_milestones(existing), update_weekly_goals_progress(active goals)
+    conn.fetch.side_effect = [
+        [],  # evaluate_milestones: no existing milestones
+        [],  # update_weekly_goals_progress: no active goals
+    ]
     conn.fetchval.side_effect = [
         False,  # first_assessment
         False,  # first_partner
         False,  # first_report
-        True,   # first_plan_complete (just completed!)
+        1,      # first_plan_complete: count = 1 (just completed!)
+        1,      # five_plans_complete: count = 1
+        1,      # ten_plans_complete: count = 1
         False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        50,     # elite_partner: 50 points (not enough)
     ]
     conn.execute.return_value = "INSERT 0 1"
 
@@ -365,26 +394,47 @@ async def test_on_plan_completed_streak_7_day_bonus():
     pool = MockPool(conn)
     yesterday = date.today() - timedelta(days=1)
 
+    # fetchrow order:
+    # 1. record_event, 2. update_streak, 3. streak_bonus_event,
+    # 4. notify_streak_reached
+    # Then evaluate_milestones: milestones that qualify get awarded, each triggers notify
+    # first_plan_complete → award → notify; three_day → award → notify; seven_day → award → notify
+    # THEN streak check fetchrow
     conn.fetchrow.side_effect = [
-        {"id": "event-1"},  # record_progress_event
-        # update_streak: existing streak at 6 days, yesterday was last active
-        {"id": "streak-1", "current_streak": 6, "longest_streak": 6, "last_active_date": yesterday},
-        {"id": "event-2"},  # streak bonus record_progress_event
-        {"current_streak": 7},  # evaluate_milestones -> seven_day_streak fetchrow
+        {"id": "event-1"},   # 1. record_progress_event
+        {"id": "streak-1", "current_streak": 6, "longest_streak": 6, "last_active_date": yesterday},  # 2. update_streak
+        {"id": "event-2"},   # 3. streak bonus record_progress_event
+        {"id": "notif-s"},   # 4. notify_streak_reached
+        # evaluate_milestones:
+        {"id": "notif-m1"},  # 5. notify first_plan_complete (awarded before streak check)
+        {"current_streak": 7},  # 6. streak fetchrow (AFTER plan milestones)
+        {"id": "notif-m2"},  # 7. notify three_day_streak
+        {"id": "notif-m3"},  # 8. notify seven_day_streak
     ]
-    conn.fetch.return_value = []  # no existing milestones
+    # fetch: evaluate_milestones(existing), update_weekly_goals_progress(active goals)
+    conn.fetch.side_effect = [
+        [],  # evaluate_milestones: no existing milestones
+        [],  # update_weekly_goals_progress: no active goals
+    ]
     conn.fetchval.side_effect = [
         False,  # first_assessment
         False,  # first_partner
         False,  # first_report
-        True,   # first_plan_complete
+        1,      # first_plan_complete
+        1,      # five_plans_complete
+        1,      # ten_plans_complete
         False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        50,     # elite_partner
     ]
     conn.execute.return_value = "INSERT 0 1"
 
     result = await on_plan_completed(pool, "user-1", "plan-1")
 
     assert result["streak"]["current_streak"] == 7
+    assert "three_day_streak" in result["new_milestones"]
     assert "seven_day_streak" in result["new_milestones"]
 
 
@@ -525,3 +575,273 @@ async def test_milestones_with_data():
     assert result["milestones"][0]["key"] == "first_assessment"
     assert result["milestones"][0]["title"] == "Self-Discovery"
     assert result["milestones"][0]["icon"] == "📝"
+
+
+
+# =============================================================================
+# New milestone condition tests (F6D expansion)
+# =============================================================================
+
+@pytest.mark.asyncio
+async def test_milestone_five_plans_complete():
+    """Awards five_plans_complete when 5+ plan_completed events exist."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = [{"milestone_key": "first_plan_complete"}]  # already earned
+    conn.fetchval.side_effect = [
+        False,  # first_assessment
+        False,  # first_partner
+        False,  # first_report
+        # first_plan already earned, skipped
+        5,      # five_plans_complete: count = 5
+        5,      # ten_plans_complete: count = 5 (not enough)
+        False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        250,    # elite_partner: not enough
+    ]
+    conn.fetchrow.return_value = None  # no streak
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "five_plans_complete" in awarded
+    assert "ten_plans_complete" not in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_ten_plans_complete():
+    """Awards ten_plans_complete when 10+ plan_completed events exist."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = [
+        {"milestone_key": "first_plan_complete"},
+        {"milestone_key": "five_plans_complete"},
+    ]
+    conn.fetchval.side_effect = [
+        False,  # first_assessment
+        False,  # first_partner
+        False,  # first_report
+        # first_plan already earned, skipped
+        # five_plans already earned, skipped
+        10,     # ten_plans_complete: count = 10
+        False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        500,    # elite_partner: 500 (enough!)
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "ten_plans_complete" in awarded
+    assert "elite_partner" in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_three_day_streak():
+    """Awards three_day_streak when current streak >= 3."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False,  # first_assessment
+        False,  # first_partner
+        False,  # first_report
+        0, 0, 0,  # plan counts
+        False,  # all_plans_complete
+        None,   # relationship_champion
+        None,   # communication_master
+        0,      # consistency_star
+        0,      # elite_partner
+    ]
+    conn.fetchrow.return_value = {"current_streak": 3}
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "three_day_streak" in awarded
+    assert "seven_day_streak" not in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_fourteen_day_streak():
+    """Awards fourteen_day_streak when current streak >= 14."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = [
+        {"milestone_key": "three_day_streak"},
+        {"milestone_key": "seven_day_streak"},
+    ]
+    conn.fetchval.side_effect = [
+        False, False, False,  # journey milestones
+        0, 0, 0,              # plan counts
+        False,                # all_plans_complete
+        None,                 # relationship_champion
+        None,                 # communication_master
+        0,                    # consistency_star
+        0,                    # elite_partner
+    ]
+    conn.fetchrow.return_value = {"current_streak": 14}
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "fourteen_day_streak" in awarded
+    assert "thirty_day_streak" not in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_thirty_day_streak():
+    """Awards thirty_day_streak when current streak >= 30."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = [
+        {"milestone_key": "three_day_streak"},
+        {"milestone_key": "seven_day_streak"},
+        {"milestone_key": "fourteen_day_streak"},
+    ]
+    conn.fetchval.side_effect = [
+        False, False, False,
+        0, 0, 0,
+        False,
+        None, None,
+        0, 0,
+    ]
+    conn.fetchrow.return_value = {"current_streak": 30}
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "thirty_day_streak" in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_relationship_champion():
+    """Awards relationship_champion when overall score >= 80."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False, False, False,  # journey
+        0, 0, 0,              # plans
+        False,                # all_plans
+        82.5,                 # relationship_champion: score = 82.5
+        None,                 # communication_master: no dim_scores
+        0,                    # consistency_star
+        0,                    # elite_partner
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "relationship_champion" in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_communication_master():
+    """Awards communication_master when communication dimension score >= 80."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    dim_scores = json.dumps({
+        "communication_style": {"score": 85, "label": "Good"},
+        "attachment_style": {"score": 50},
+    })
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False, False, False,
+        0, 0, 0,
+        False,
+        60.0,      # relationship_champion: score 60 (not enough)
+        dim_scores, # communication_master: has dimension_scores
+        0,         # consistency_star
+        0,         # elite_partner
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "communication_master" in awarded
+    assert "relationship_champion" not in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_consistency_star():
+    """Awards consistency_star when active for 4 consecutive weeks."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False, False, False,
+        0, 0, 0,
+        False,
+        None, None,
+        4,     # consistency_star: 4 distinct weeks
+        0,     # elite_partner
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "consistency_star" in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_elite_partner():
+    """Awards elite_partner when lifetime points >= 500."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False, False, False,
+        0, 0, 0,
+        False,
+        None, None,
+        0,     # consistency_star
+        500,   # elite_partner: exactly 500
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "elite_partner" in awarded
+
+
+@pytest.mark.asyncio
+async def test_milestone_not_awarded_below_threshold():
+    """Does not award elite_partner when points below 500."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+
+    conn.fetch.return_value = []
+    conn.fetchval.side_effect = [
+        False, False, False,
+        0, 0, 0,
+        False,
+        None, None,
+        0,     # consistency_star
+        499,   # elite_partner: 499 (not enough)
+    ]
+    conn.fetchrow.return_value = None
+    conn.execute.return_value = "INSERT 0 1"
+
+    awarded = await evaluate_milestones(pool, "user-1")
+
+    assert "elite_partner" not in awarded
