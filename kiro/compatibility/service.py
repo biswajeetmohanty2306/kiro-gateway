@@ -20,6 +20,19 @@ from .exceptions import (
 )
 
 
+def _display_name(user_row) -> str:
+    """Derive display name from a users table row. Fallback: email prefix → 'User'."""
+    if not user_row:
+        return "User"
+    name = user_row.get("name") if hasattr(user_row, "get") else (user_row["name"] if user_row else None)
+    if name and str(name).strip():
+        return str(name).strip()
+    email = user_row.get("email") if hasattr(user_row, "get") else (user_row["email"] if user_row else None)
+    if email and "@" in str(email):
+        return str(email).split("@")[0]
+    return "User"
+
+
 async def get_report(pool: Any, user_id: str) -> dict:
     """
     Get the current compatibility report for the user's partnership.
@@ -143,6 +156,28 @@ async def generate_report(pool: Any, user_id: str) -> dict:
         # 4. Compute compatibility (pure function)
         result = compute_compatibility(user_dims, partner_dims)
 
+        # 4b. Personalize challenge plans with real names
+        from .personalize import personalize_challenge_plans
+
+        # Fetch display names for personalization
+        user_row = await conn.fetchrow(
+            "SELECT name, email FROM public.users WHERE user_id = $1", user_id
+        )
+        partner_row = await conn.fetchrow(
+            "SELECT name, email FROM public.users WHERE user_id = $1", partner_id
+        )
+
+        user_name = _display_name(user_row)
+        partner_name = _display_name(partner_row)
+
+        # Extract type maps for personalization
+        user_types = {dim: data.get("type", "unknown") for dim, data in user_dims.items()}
+        partner_types = {dim: data.get("type", "unknown") for dim, data in partner_dims.items()}
+
+        personalized_plans = personalize_challenge_plans(
+            result.challenge_plans, user_name, partner_name, user_types, partner_types
+        )
+
         # 5. Build dimension_scores JSONB for storage
         dim_scores_json = {}
         for dim_key, dim in result.dimensions.items():
@@ -194,8 +229,15 @@ async def generate_report(pool: Any, user_id: str) -> dict:
             report_row["id"],
         )
 
-        # 8. Insert new improvement plans (3 challenges)
-        for plan in result.challenge_plans:
+        # 8. Insert new improvement plans (3 challenges) — personalized
+        for plan in personalized_plans:
+            # Store enriched content in action_plan JSONB
+            enriched_action_plan = {
+                "steps": plan["action_plan"],
+                "current_situation": plan.get("current_situation", ""),
+                "why_this_happens": plan.get("why_this_happens", ""),
+                "expected_outcome": plan.get("expected_outcome", ""),
+            }
             await conn.execute(
                 """
                 INSERT INTO public.improvement_plans (
@@ -207,9 +249,9 @@ async def generate_report(pool: Any, user_id: str) -> dict:
                 report_row["id"],
                 plan["dimension"],
                 plan["severity"],
-                plan["challenge_description"],
-                json.dumps(plan["action_plan"]),
-                plan["weekly_exercise"],
+                plan.get("challenge_description", ""),
+                json.dumps(enriched_action_plan),
+                plan.get("weekly_exercise", ""),
             )
 
         return {
@@ -219,7 +261,7 @@ async def generate_report(pool: Any, user_id: str) -> dict:
             "improvement_potential": result.improvement_potential,
             "created_at": report_row["created_at"].isoformat(),
             "dimensions": dim_scores_json,
-            "challenge_plans": result.challenge_plans,
+            "challenge_plans": personalized_plans,
         }
 
 

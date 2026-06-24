@@ -192,6 +192,9 @@ async def test_generate_success():
         {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},
         {"id": "profile-a", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
         {"id": "profile-b", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
+        # Personalization: user name + partner name lookups
+        {"name": "Alice", "email": "alice@example.com"},
+        {"name": "Bob", "email": "bob@example.com"},
         {"id": "report-1", "created_at": NOW},  # UPSERT returning
     ]
 
@@ -202,8 +205,57 @@ async def test_generate_success():
     assert "dimensions" in result
     assert "challenge_plans" in result
     assert len(result["challenge_plans"]) == 3
+    # Personalized plans should contain user names
+    assert any("Alice" in str(plan) for plan in result["challenge_plans"])
     # Verify execute was called (DELETE old plans + 3 INSERTs)
     assert conn.execute.call_count == 4  # 1 delete + 3 inserts
+
+
+@pytest.mark.asyncio
+async def test_generate_success_null_names():
+    """Report generates with email-prefix fallback when names are NULL."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+    conn.fetchrow.side_effect = [
+        {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},
+        {"id": "profile-a", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
+        {"id": "profile-b", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
+        # Personalization: both names NULL → falls back to email prefix
+        {"name": None, "email": "alice@example.com"},
+        {"name": None, "email": "bob@example.com"},
+        {"id": "report-1", "created_at": NOW},
+    ]
+
+    result = await generate_report(pool, "user-1")
+
+    assert result["report_id"] == "report-1"
+    assert len(result["challenge_plans"]) == 3
+    # Should use email prefix
+    assert any("alice" in str(plan) for plan in result["challenge_plans"])
+
+
+@pytest.mark.asyncio
+async def test_generate_enriched_plan_structure():
+    """Generated plans include personalized fields."""
+    conn = MockConnection()
+    pool = MockPool(conn)
+    conn.fetchrow.side_effect = [
+        {"id": "conn-1", "inviter_id": "user-1", "invitee_id": "user-2"},
+        {"id": "profile-a", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
+        {"id": "profile-b", "dimension_scores": SAMPLE_DIM_SCORES, "created_at": NOW},
+        {"name": "Sarah", "email": "sarah@test.com"},
+        {"name": "Raj", "email": "raj@test.com"},
+        {"id": "report-1", "created_at": NOW},
+    ]
+
+    result = await generate_report(pool, "user-1")
+
+    plan = result["challenge_plans"][0]
+    assert "current_situation" in plan
+    assert "why_this_happens" in plan
+    assert "expected_outcome" in plan
+    assert "Sarah" in plan["current_situation"]
+    assert "Raj" in plan["current_situation"]
 
 
 # --- Tests: get_improvement_plans ---

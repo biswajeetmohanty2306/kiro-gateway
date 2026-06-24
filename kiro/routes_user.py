@@ -150,6 +150,9 @@ async def auth_onboarding(
     """
     Complete onboarding for the authenticated, ACTIVE user (M8a).
 
+    Accepts optional JSON body with profile fields (name, gender, country)
+    to persist alongside the onboarding completion.
+
     Depends on ``get_auth_state`` (must be ACTIVE) — deliberately NOT
     ``require_onboarded``, because an un-onboarded user must be able to reach this
     route to onboard (PhaseC §6.2). Performs the atomic conditional ``false→true``
@@ -162,6 +165,48 @@ async def auth_onboarding(
     back a completed onboarding (M5 §6).
     """
     bundle = request.app.state.supabase_auth  # non-None: get_auth_state authenticated
+
+    # Parse optional body fields (name, gender, country)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass  # No body or invalid JSON — proceed without profile fields
+
+    # Save optional profile fields before completing onboarding
+    name = body.get("name") if isinstance(body, dict) else None
+    gender = body.get("gender") if isinstance(body, dict) else None
+    country = body.get("country") if isinstance(body, dict) else None
+
+    # Build dynamic UPDATE for provided fields
+    updates = []
+    params = []
+    param_idx = 1
+
+    if name and isinstance(name, str) and name.strip():
+        updates.append(f"name = ${param_idx}")
+        params.append(name.strip()[:100])
+        param_idx += 1
+
+    if gender and isinstance(gender, str) and gender.strip():
+        updates.append(f"gender = ${param_idx}")
+        params.append(gender.strip()[:20])
+        param_idx += 1
+
+    if country and isinstance(country, str) and country.strip():
+        updates.append(f"country = ${param_idx}")
+        params.append(country.strip()[:100])
+        param_idx += 1
+
+    if updates:
+        try:
+            params.append(user.user_id)
+            sql = f"UPDATE public.users SET {', '.join(updates)} WHERE user_id = ${param_idx}"
+            async with bundle._audit_pool.acquire() as conn:
+                await conn.execute(sql, *params)
+        except Exception:
+            pass  # Best-effort — don't block onboarding if profile save fails
+
     # The privileged acquirer (the same pool the readers use). The onboarding
     # transition runs as the 'authenticated' role inside its own transaction so
     # users_update_own RLS applies (see onboarding.py).
