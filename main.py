@@ -101,6 +101,12 @@ from kiro.compatibility.router import router as compatibility_router
 from kiro.compatibility.exceptions import CompatibilityError
 from kiro.progress.router import router as progress_router
 from kiro.progress.exceptions import ProgressError
+from kiro.hardening import (
+    SecurityHeadersMiddleware,
+    ResponseTimingMiddleware,
+    register_global_exception_handler,
+    register_health_endpoint,
+)
 
 
 # --- Loguru Configuration ---
@@ -581,17 +587,24 @@ app = FastAPI(
 # --- Middleware registration ---
 # Starlette applies middleware LIFO: the LAST add_middleware call is the
 # OUTERMOST layer (first to see the request). To get the request-processing
-# order CORS -> RequestId -> Debug (M6-D4, resolved), we register them in
-# reverse: Debug (innermost) first, then RequestId, then CORS (outermost) last.
+# order CORS -> SecurityHeaders -> RequestId -> ResponseTiming -> Debug,
+# we register them in reverse.
 
 # Debug Logger Middleware (innermost) — initializes debug logging BEFORE
 # Pydantic validation so it can capture validation errors (422) in debug logs.
 app.add_middleware(DebugLoggerMiddleware)
 
+# Response Timing Middleware — measures request duration, adds X-Response-Time
+# header, logs slow requests (>1000ms).
+app.add_middleware(ResponseTimingMiddleware)
+
 # Request-id correlation middleware (M6) — assigns/propagates X-Request-Id and
 # binds it to loguru so debug logs (and downstream auth/audit) carry the id.
-# Sits between CORS and Debug.
 app.add_middleware(RequestIdMiddleware)
+
+# Security Headers Middleware — adds X-Content-Type-Options, X-Frame-Options,
+# Referrer-Policy to all responses.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # CORS Middleware (outermost) — origin allowlist sourced from
 # USER_AUTH_CORS_ALLOWED_ORIGINS (M1, S5). Resolved and validated at
@@ -646,6 +659,15 @@ app.include_router(assessment_router)
 app.include_router(partners_router)
 app.include_router(compatibility_router)
 app.include_router(progress_router)
+
+# --- Global exception handler (F7A) ---
+# Catch-all for unhandled exceptions. Returns structured JSON, logs full trace.
+# Must be registered AFTER domain-specific handlers (Assessment, Partner, etc.)
+# so those take priority for known exception types.
+register_global_exception_handler(app)
+
+# --- Health check endpoint (F7A) ---
+register_health_endpoint(app)
 
 
 @app.exception_handler(AssessmentError)
