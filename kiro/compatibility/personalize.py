@@ -183,30 +183,125 @@ _SITUATION_CLOSINGS: Dict[str, str] = {
 # Generic name replacements for action steps
 # ─────────────────────────────────────────────────────────────────────────────
 
-_GENERIC_PATTERNS = [
-    (r"\bPartner A\b", "{user_name}"),
-    (r"\bPartner B\b", "{partner_name}"),
-    (r"\bOne partner\b", "{user_name}"),
-    (r"\bThe other partner\b", "{partner_name}"),
-    (r"\bone partner\b", "{user_name}"),
-    (r"\bthe other partner\b", "{partner_name}"),
-    (r"\bThe pursuing partner\b", "{user_name}"),
-    (r"\bthe pursuing partner\b", "{user_name}"),
-    (r"\bThe withdrawing partner\b", "{partner_name}"),
-    (r"\bthe withdrawing partner\b", "{partner_name}"),
-    (r"\bThe partner who reaches out more\b", "{user_name}"),
-    (r"\bthe partner who reaches out more\b", "{user_name}"),
-    (r"\bThe partner who needs space\b", "{partner_name}"),
-    (r"\bthe partner who needs space\b", "{partner_name}"),
-    (r"\bThe direct partner\b", "{user_name}"),
-    (r"\bthe direct partner\b", "{user_name}"),
-    (r"\bThe diplomatic partner\b", "{partner_name}"),
-    (r"\bthe diplomatic partner\b", "{partner_name}"),
-]
+# Role labels that must NEVER appear in final user-facing content.
+# These are replaced dynamically based on user_type/partner_type context.
+_ROLE_LABELS_USER: Dict[str, List[str]] = {
+    # Attachment
+    "anxious": ["the pursuing partner", "the partner who reaches out", "the partner who reaches out more", "the partner who seeks reassurance"],
+    "avoidant": ["the withdrawing partner", "the partner who needs space", "the quieter partner", "the quiet partner"],
+    "fearful_avoidant": ["the partner who oscillates"],
+    # Communication
+    "direct": ["the direct partner", "the blunt partner", "the efficient partner"],
+    "diplomatic": ["the diplomatic partner", "the gentle partner", "the soft partner"],
+    "analytical": ["the logical partner", "the analytical partner", "the practical partner"],
+    "expressive": ["the expressive partner", "the emotional partner", "the more expressive partner", "the storyteller"],
+    # Conflict
+    "avoiding": ["the quieter partner", "the quiet partner", "the partner who retreats", "the partner who needs space"],
+    "competing": ["the more intense partner", "the louder partner", "the intense partner", "the confrontational partner"],
+    "collaborative": ["the partner who wants to talk", "the talker", "the talking partner", "the engager"],
+    "compromising": ["the partner who compromises"],
+    # Financial
+    "saver": ["the saver", "the saving partner"],
+    "spender": ["the spender", "the spending partner", "the present-focused partner"],
+    "investor": ["the investor", "the future-focused partner", "the planning partner", "the future-planner", "the planner"],
+    "balanced": ["the balanced partner"],
+    # Lifestyle
+    "adventurous": ["the adventure partner", "the adventurous partner", "the active partner"],
+    "homebody": ["the homebody", "the home partner"],
+    "social": ["the social partner"],
+    # Love language
+    "words": ["the words partner", "the verbal partner"],
+    "touch": ["the touch partner", "the physical partner"],
+    "time": ["the time partner", "the presence partner"],
+    "acts": ["the acts partner"],
+    "gifts": ["the gifts partner"],
+    # Archetype
+    "partner": ["the togetherness partner", "the depth partner"],
+    "independent": ["the independent partner", "the autonomy partner"],
+    "nurturer": ["the caring partner", "the nurturing partner"],
+    "explorer": ["the explorer", "the growth partner"],
+}
+
+
+def personalize_action_steps(
+    steps: List[str],
+    user_name: str,
+    partner_name: str,
+    user_type: str = "",
+    partner_type: str = "",
+) -> List[str]:
+    """
+    Replace ALL role labels with actual names in action steps.
+
+    Uses type information to correctly map "the direct partner" → the person
+    who actually IS direct (user or partner).
+    """
+    return [_replace_labels(s, user_name, partner_name, user_type, partner_type) for s in steps]
+
+
+def personalize_text(
+    text: str,
+    user_name: str,
+    partner_name: str,
+    user_type: str = "",
+    partner_type: str = "",
+) -> str:
+    """Replace ALL role labels in a single text string."""
+    return _replace_labels(text, user_name, partner_name, user_type, partner_type)
+
+
+def _replace_labels(
+    text: str,
+    user_name: str,
+    partner_name: str,
+    user_type: str,
+    partner_type: str,
+) -> str:
+    """Core label replacement — handles all known role descriptors."""
+    result = text
+
+    # Build replacement map: label → name (longer labels first to avoid partial matches)
+    replacements: List[tuple] = []
+
+    # Type-specific labels for user
+    for label in _ROLE_LABELS_USER.get(user_type, []):
+        replacements.append((label, user_name))
+
+    # Type-specific labels for partner
+    for label in _ROLE_LABELS_USER.get(partner_type, []):
+        if label not in [r[0] for r in replacements]:
+            replacements.append((label, partner_name))
+
+    # Sort by length descending (match longer phrases first)
+    replacements.sort(key=lambda x: len(x[0]), reverse=True)
+
+    # Apply type-specific replacements (case-insensitive)
+    for label, name in replacements:
+        pattern = re.compile(re.escape(label), re.IGNORECASE)
+        result = pattern.sub(name, result)
+
+    # Static fallback patterns
+    static_patterns = [
+        ("Partner A", user_name),
+        ("Partner B", partner_name),
+        ("One partner", user_name),
+        ("one partner", user_name),
+        ("The other partner", partner_name),
+        ("the other partner", partner_name),
+        ("Both partners", f"{user_name} and {partner_name}"),
+        ("both partners", f"{user_name} and {partner_name}"),
+        ("your partner", partner_name),
+        ("Your partner", partner_name),
+    ]
+
+    for label, name in static_patterns:
+        result = result.replace(label, name)
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public API
+# Main API: personalize_challenge_plans
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -246,7 +341,7 @@ def personalize_challenge_plans(
                 dimension, user_name, user_type, partner_name, partner_type
             ),
             "action_plan": personalize_action_steps(
-                plan.get("action_plan", []), user_name, partner_name
+                plan.get("action_plan", []), user_name, partner_name, user_type, partner_type
             ),
             "weekly_exercise": plan.get("weekly_exercise", ""),
             "expected_outcome": build_expected_outcome(dimension, severity),
@@ -313,24 +408,6 @@ def build_why_section(
         user_desc_short=user_desc,
         partner_desc_short=partner_desc,
     )
-
-
-def personalize_action_steps(
-    steps: List[str],
-    user_name: str,
-    partner_name: str,
-) -> List[str]:
-    """
-    Replace generic partner references with actual names in action steps.
-    """
-    personalized = []
-    for step in steps:
-        result = step
-        for pattern, replacement in _GENERIC_PATTERNS:
-            resolved = replacement.format(user_name=user_name, partner_name=partner_name)
-            result = re.sub(pattern, resolved, result)
-        personalized.append(result)
-    return personalized
 
 
 def build_expected_outcome(dimension: str, severity: str) -> str:

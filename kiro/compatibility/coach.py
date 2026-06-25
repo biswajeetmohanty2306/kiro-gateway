@@ -17,8 +17,10 @@ from .personalize import (
     _get_type_description,
     build_why_section,
     build_expected_outcome,
+    personalize_text,
     TYPE_DESCRIPTIONS,
 )
+from .wisdom import select_wisdom, build_wisdom_closing, get_introduction
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -738,6 +740,9 @@ def generate_coaching_plan(
     partner_type: str,
     action_steps: List[str],
     weekly_exercise: str,
+    overall_score: float = 60.0,
+    user_id: str = "",
+    report_id: str = "",
 ) -> dict:
     """
     Generate the full v3 coaching plan for one dimension.
@@ -751,9 +756,12 @@ def generate_coaching_plan(
         partner_type: e.g., "avoidant"
         action_steps: Already-personalized action step strings
         weekly_exercise: Exercise text from recommendations
+        overall_score: Overall compatibility score (for introduction tone)
+        user_id: For wisdom selection determinism
+        report_id: For wisdom selection determinism
 
     Returns:
-        Dict with version=3 and all 14 sections populated.
+        Dict with version=3 and all sections populated.
     """
     key = frozenset({user_type, partner_type})
 
@@ -761,26 +769,39 @@ def generate_coaching_plan(
         action_steps, user_name, partner_name, user_type, partner_type
     )
 
+    # Select contextual wisdom
+    wisdom_quote = select_wisdom(dimension, severity, user_id, report_id)
+    wisdom_closing = build_wisdom_closing(dimension, wisdom_quote)
+
+    # Apply final label cleanup to all text fields
+    def _clean(text):
+        return personalize_text(text, user_name, partner_name, user_type, partner_type)
+
     return {
         "version": 3,
-        "whats_happening": _resolve_whats_happening(dimension, key, user_name, partner_name),
+        "user_name": user_name,
+        "partner_name": partner_name,
+        "introduction": get_introduction(overall_score),
+        "whats_happening": _clean(_resolve_whats_happening(dimension, key, user_name, partner_name)),
         "example_dialogue": _resolve_dialogue(dimension, key, user_name, partner_name),
         "example_closing": _resolve_dialogue_closing(dimension, key, user_name, partner_name),
         "feelings": {
             "user": FEELINGS_BY_TYPE.get((dimension, user_type), _generic_feelings("user")),
             "partner": FEELINGS_BY_TYPE.get((dimension, partner_type), _generic_feelings("partner")),
         },
-        "why_this_happens": build_why_section(dimension, user_name, user_type, partner_name, partner_type),
+        "why_this_happens": _clean(build_why_section(dimension, user_name, user_type, partner_name, partner_type)),
         "validation": _resolve_validation(dimension, user_name, partner_name),
         "difficulty": _resolve_difficulty(dimension, severity),
-        "user_actions": user_actions,
-        "partner_actions": partner_actions,
-        "together_actions": together_actions,
+        "user_actions": [_clean(s) for s in user_actions],
+        "partner_actions": [_clean(s) for s in partner_actions],
+        "together_actions": [_clean(s) for s in together_actions],
         "mistakes": _resolve_mistakes(dimension, key, severity),
-        "weekly_challenge": format_challenge(weekly_exercise),
+        "weekly_challenge": format_challenge(_clean(weekly_exercise)),
         "first_step": _resolve_first_step(dimension, key, user_name, partner_name),
         "can_this_improve": CAN_IMPROVE.get(dimension, CAN_IMPROVE.get("attachment_style", "")),
         "expected_outcome": build_expected_outcome(dimension, severity),
+        "wisdom": wisdom_quote,
+        "wisdom_closing": wisdom_closing,
     }
 
 

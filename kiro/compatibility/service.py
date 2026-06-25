@@ -229,15 +229,38 @@ async def generate_report(pool: Any, user_id: str) -> dict:
             report_row["id"],
         )
 
-        # 8. Insert new improvement plans (3 challenges) — personalized
+        # 8. Insert new improvement plans (3 challenges) — v3 coaching format
+        from .coach import generate_coaching_plan
+        from .human_coach import generate_human_coaching, is_migrated
+
         for plan in personalized_plans:
-            # Store enriched content in action_plan JSONB
-            enriched_action_plan = {
-                "steps": plan["action_plan"],
-                "current_situation": plan.get("current_situation", ""),
-                "why_this_happens": plan.get("why_this_happens", ""),
-                "expected_outcome": plan.get("expected_outcome", ""),
-            }
+            dim = plan["dimension"]
+            u_type = user_types.get(dim, plan.get("user_a_type", ""))
+            p_type = partner_types.get(dim, plan.get("user_b_type", ""))
+
+            # Try narrative engine first (migrated dimensions)
+            coaching_plan = None
+            if is_migrated(dim):
+                coaching_plan = generate_human_coaching(
+                    dimension=dim, severity=plan["severity"],
+                    user_name=user_name, partner_name=partner_name,
+                    user_type=u_type, partner_type=p_type,
+                    overall_score=result.overall_score,
+                    user_id=user_id, report_id=str(report_row["id"]),
+                )
+
+            # Fallback to template engine
+            if coaching_plan is None:
+                coaching_plan = generate_coaching_plan(
+                    dimension=dim, severity=plan["severity"],
+                    user_name=user_name, partner_name=partner_name,
+                    user_type=u_type, partner_type=p_type,
+                    action_steps=plan["action_plan"],
+                    weekly_exercise=plan.get("weekly_exercise", ""),
+                    overall_score=result.overall_score,
+                    user_id=user_id, report_id=str(report_row["id"]),
+                )
+
             await conn.execute(
                 """
                 INSERT INTO public.improvement_plans (
@@ -249,8 +272,8 @@ async def generate_report(pool: Any, user_id: str) -> dict:
                 report_row["id"],
                 plan["dimension"],
                 plan["severity"],
-                plan.get("challenge_description", ""),
-                json.dumps(enriched_action_plan),
+                coaching_plan.get("whats_happening", plan.get("challenge_description", "")),
+                json.dumps(coaching_plan),
                 plan.get("weekly_exercise", ""),
             )
 

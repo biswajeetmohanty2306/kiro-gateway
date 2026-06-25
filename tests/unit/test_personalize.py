@@ -235,14 +235,14 @@ class TestPersonalizeActionSteps:
     def test_replaces_pursuing_partner(self):
         """'The pursuing partner' becomes user_name."""
         steps = ["The pursuing partner practices self-soothing"]
-        result = personalize_action_steps(steps, "Sarah", "Raj")
+        result = personalize_action_steps(steps, "Sarah", "Raj", "anxious", "avoidant")
         assert "Sarah" in result[0]
         assert "pursuing partner" not in result[0]
 
     def test_replaces_withdrawing_partner(self):
         """'The withdrawing partner' becomes partner_name."""
         steps = ["The withdrawing partner communicates return time"]
-        result = personalize_action_steps(steps, "Sarah", "Raj")
+        result = personalize_action_steps(steps, "Sarah", "Raj", "anxious", "avoidant")
         assert "Raj" in result[0]
         assert "withdrawing partner" not in result[0]
 
@@ -349,7 +349,7 @@ class TestEdgeCases:
     def test_names_with_special_characters(self):
         """Names with special chars don't break regex."""
         result = personalize_action_steps(
-            ["The pursuing partner does X"], "O'Brien", "José"
+            ["The pursuing partner does X"], "O'Brien", "Jose", "anxious", "avoidant"
         )
         assert "O'Brien" in result[0]
 
