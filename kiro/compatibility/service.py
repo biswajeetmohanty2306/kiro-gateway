@@ -92,6 +92,32 @@ async def get_report(pool: Any, user_id: str) -> dict:
         if isinstance(dim_scores, str):
             dim_scores = json.loads(dim_scores)
 
+        # Generate reflection for display
+        from .relationship_reflection import generate_reflection as gen_refl
+        inviter_id = str(connection["inviter_id"])
+        invitee_id = str(connection["invitee_id"])
+        partner_id = invitee_id if inviter_id == user_id else inviter_id
+
+        user_row = await conn.fetchrow("SELECT name, email FROM public.users WHERE user_id = $1", user_id)
+        partner_row_data = await conn.fetchrow("SELECT name, email FROM public.users WHERE user_id = $1", partner_id)
+
+        u_name = _display_name(user_row)
+        p_name = _display_name(partner_row_data)
+
+        # Determine top strength/challenge from dimension scores
+        dim_list = [(k, v.get("score", 50) if isinstance(v, dict) else 50) for k, v in dim_scores.items()]
+        dim_list.sort(key=lambda x: x[1], reverse=True)
+        top_str = dim_list[0][0] if dim_list else ""
+        top_chal = dim_list[-1][0] if dim_list else ""
+
+        reflection = gen_refl(
+            overall_score=float(report["overall_score"]),
+            user_name=u_name, partner_name=p_name,
+            top_strength_dimension=top_str,
+            top_challenge_dimension=top_chal,
+            seed=f"{user_id}:{report['id']}",
+        )
+
         return {
             "has_report": True,
             "report": {
@@ -101,6 +127,7 @@ async def get_report(pool: Any, user_id: str) -> dict:
                 "report_version": report["report_version"],
                 "created_at": report["created_at"].isoformat(),
                 "dimensions": dim_scores,
+                "reflection": reflection,
             },
         }
 
@@ -277,6 +304,20 @@ async def generate_report(pool: Any, user_id: str) -> dict:
                 plan.get("weekly_exercise", ""),
             )
 
+        # Generate relationship reflection
+        from .relationship_reflection import generate_reflection as gen_refl
+        sorted_dims = sorted(result.dimensions.values(), key=lambda d: d.score, reverse=True)
+        top_strength_dim = sorted_dims[0].dimension if sorted_dims else ""
+        top_challenge_dim = sorted_dims[-1].dimension if sorted_dims else ""
+        reflection = gen_refl(
+            overall_score=result.overall_score,
+            user_name=user_name,
+            partner_name=partner_name,
+            top_strength_dimension=top_strength_dim,
+            top_challenge_dimension=top_challenge_dim,
+            seed=f"{user_id}:{report_row['id']}",
+        )
+
         return {
             "report_id": str(report_row["id"]),
             "overall_score": result.overall_score,
@@ -285,6 +326,7 @@ async def generate_report(pool: Any, user_id: str) -> dict:
             "created_at": report_row["created_at"].isoformat(),
             "dimensions": dim_scores_json,
             "challenge_plans": personalized_plans,
+            "reflection": reflection,
         }
 
 

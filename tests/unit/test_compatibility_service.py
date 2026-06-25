@@ -133,12 +133,17 @@ async def test_get_report_success():
             "report_version": "v1",
             "created_at": NOW,
         },
+        # Reflection: user name + partner name lookups
+        {"name": "Alice", "email": "alice@example.com"},
+        {"name": "Bob", "email": "bob@example.com"},
     ]
 
     result = await get_report(pool, "user-1")
     assert result["has_report"] is True
     assert result["report"]["overall_score"] == 62.5
     assert result["report"]["report_id"] == "report-1"
+    assert "reflection" in result["report"]
+    assert result["report"]["reflection"]["title"] == "What we see in your relationship"
 
 
 # --- Tests: generate_report ---
