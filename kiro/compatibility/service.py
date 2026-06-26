@@ -33,6 +33,27 @@ def _display_name(user_row) -> str:
     return "User"
 
 
+async def _initialize_journey(conn, connection_id: str, user_id: str) -> None:
+    """Initialize journey_state for one user after a successful report generation.
+
+    Called once per partner when a compatibility report is generated.
+    Idempotent: ON CONFLICT DO NOTHING ensures no duplicates if the report
+    is regenerated. The journey starts at now() — the moment the report
+    was first created for this user.
+
+    Assessment → Generate Report → Journey automatically starts.
+    """
+    await conn.execute(
+        """
+        INSERT INTO public.journey_state (connection_id, user_id, started_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (connection_id, user_id) DO NOTHING
+        """,
+        connection_id,
+        user_id,
+    )
+
+
 async def get_report(pool: Any, user_id: str) -> dict:
     """
     Get the current compatibility report for the user's partnership.
@@ -317,6 +338,13 @@ async def generate_report(pool: Any, user_id: str) -> dict:
             top_challenge_dimension=top_challenge_dim,
             seed=f"{user_id}:{report_row['id']}",
         )
+
+        # 9. Initialize the Relationship Journey (J2).
+        # The journey begins automatically after the first compatibility report
+        # is successfully generated. Uses ON CONFLICT DO NOTHING so re-generating
+        # a report never creates duplicate journey rows.
+        await _initialize_journey(conn, str(connection["id"]), user_id)
+        await _initialize_journey(conn, str(connection["id"]), partner_id)
 
         return {
             "report_id": str(report_row["id"]),

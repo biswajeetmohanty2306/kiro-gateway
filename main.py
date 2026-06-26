@@ -101,6 +101,8 @@ from kiro.compatibility.router import router as compatibility_router
 from kiro.compatibility.exceptions import CompatibilityError
 from kiro.progress.router import router as progress_router
 from kiro.progress.exceptions import ProgressError
+from kiro.journey.router import router as journey_router
+from kiro.journey.exceptions import JourneyError
 from kiro.hardening import (
     SecurityHeadersMiddleware,
     ResponseTimingMiddleware,
@@ -659,6 +661,7 @@ app.include_router(assessment_router)
 app.include_router(partners_router)
 app.include_router(compatibility_router)
 app.include_router(progress_router)
+app.include_router(journey_router)
 
 # --- Global exception handler (F7A) ---
 # Catch-all for unhandled exceptions. Returns structured JSON, logs full trace.
@@ -702,6 +705,16 @@ async def handle_compatibility_error(request, exc: CompatibilityError):
 
 @app.exception_handler(ProgressError)
 async def handle_progress_error(request, exc: ProgressError):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "message": exc.message},
+    )
+
+
+@app.exception_handler(JourneyError)
+async def handle_journey_error(request, exc: JourneyError):
     from fastapi.responses import JSONResponse
 
     return JSONResponse(

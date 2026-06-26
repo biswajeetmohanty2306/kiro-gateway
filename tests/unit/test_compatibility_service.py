@@ -212,8 +212,8 @@ async def test_generate_success():
     assert len(result["challenge_plans"]) == 3
     # Personalized plans should contain user names
     assert any("Alice" in str(plan) for plan in result["challenge_plans"])
-    # Verify execute was called (DELETE old plans + 3 INSERTs)
-    assert conn.execute.call_count == 4  # 1 delete + 3 inserts
+    # Verify execute was called (DELETE old plans + 3 INSERTs + 2 journey initializations)
+    assert conn.execute.call_count == 6  # 1 delete + 3 inserts + 2 journey inits
 
 
 @pytest.mark.asyncio
