@@ -23,8 +23,9 @@ from .schemas import (
     QuestionsResponse,
     ReflectionSubmissionResponse,
     SubmitReflectionRequest,
+    TimelineResponse,
 )
-from .service import get_history, get_journey, get_questions, submit_reflection
+from .service import get_history, get_journey, get_questions, submit_reflection, get_timeline
 
 router = APIRouter(prefix="/api/journey", tags=["Journey"])
 
@@ -78,3 +79,14 @@ async def journey_history(
     """Get past reflections in reverse chronological order."""
     pool = _get_pool(request)
     return await get_history(pool, _get_user_id(user), limit=limit)
+
+
+
+@router.get("/timeline", response_model=TimelineResponse)
+async def journey_timeline(
+    request: Request,
+    user: AuthenticatedUser = Depends(get_current_user_profile),
+):
+    """Get the relationship timeline — chronological events from the journey."""
+    pool = _get_pool(request)
+    return await get_timeline(pool, _get_user_id(user))

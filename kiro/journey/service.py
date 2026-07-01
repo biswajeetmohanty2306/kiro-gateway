@@ -708,3 +708,158 @@ def _format_history_entry(row) -> Dict[str, Any]:
         "responses": enriched,
         "created_at": row["created_at"].isoformat(),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Timeline (J6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SQL_TIMELINE_REFLECTIONS = """
+    SELECT week_number, created_at
+    FROM public.weekly_reflections
+    WHERE connection_id = $1 AND user_id = $2
+    ORDER BY created_at ASC
+"""
+
+_SQL_TIMELINE_REPORT = """
+    SELECT created_at
+    FROM public.compatibility_reports
+    WHERE connection_id = $1
+"""
+
+_SQL_TIMELINE_CONNECTION = """
+    SELECT accepted_at
+    FROM public.partner_connections
+    WHERE id = $1
+"""
+
+
+async def _load_timeline_context(conn, connection_id: str, user_id: str):
+    """Load all data needed to construct a TimelineContext from the database.
+
+    Responsibilities:
+      - Load journey_started_at from journey_state
+      - Calculate current_week using frozen week calculation
+      - Load report_created_at from compatibility_reports
+      - Load connection_accepted_at from partner_connections
+      - Load reflection records from weekly_reflections
+      - Load the current insight message
+      - Construct and return a TimelineContext
+
+    This function owns all DB access for the timeline.
+    timeline.py never touches the database.
+    """
+    from .timeline import TimelineContext, ReflectionRecord
+    from .insights import generate_insight
+
+    # Journey state
+    state_row = await conn.fetchrow(_SQL_JOURNEY_STATE, connection_id, user_id)
+    if not state_row:
+        return None
+
+    started_at = state_row["started_at"]
+    journey_start_date = started_at.date() if hasattr(started_at, "date") else started_at
+    current_week = _week_number_since(started_at)
+    today = _today()
+
+    # Report created_at
+    report_row = await conn.fetchrow(_SQL_TIMELINE_REPORT, connection_id)
+    report_created_at = None
+    if report_row and report_row["created_at"]:
+        ts = report_row["created_at"]
+        report_created_at = ts.date() if hasattr(ts, "date") else ts
+
+    # Connection accepted_at
+    conn_row = await conn.fetchrow(_SQL_TIMELINE_CONNECTION, connection_id)
+    connection_accepted_at = None
+    if conn_row and conn_row["accepted_at"]:
+        ts = conn_row["accepted_at"]
+        connection_accepted_at = ts.date() if hasattr(ts, "date") else ts
+
+    # Reflections (chronological)
+    ref_rows = await conn.fetch(_SQL_TIMELINE_REFLECTIONS, connection_id, user_id)
+    reflections = []
+    for row in ref_rows:
+        created = row["created_at"]
+        ref_date = created.date() if hasattr(created, "date") else created
+        reflections.append(ReflectionRecord(
+            week_number=row["week_number"],
+            created_at=ref_date,
+        ))
+
+    # Insight message (reuse existing helper pattern)
+    insight_message = None
+    if len(reflections) >= 3:
+        recent = await _load_recent_reflections(conn, connection_id, user_id)
+        insight_data = generate_insight(recent)
+        if insight_data and insight_data.get("trend") not in (None, "insufficient"):
+            insight_message = insight_data.get("message")
+
+    return TimelineContext(
+        journey_started_at=journey_start_date,
+        current_week=current_week,
+        today=today,
+        reflections=reflections,
+        report_created_at=report_created_at,
+        connection_accepted_at=connection_accepted_at,
+        insight_message=insight_message,
+    )
+
+
+async def _build_timeline(conn, connection_id: str, user_id: str) -> List[Dict[str, Any]]:
+    """Load context → generate timeline events → serialize.
+
+    Returns a list of serialized timeline event dicts ready for API response.
+    """
+    from .timeline import generate_timeline
+
+    context = await _load_timeline_context(conn, connection_id, user_id)
+    if context is None:
+        return []
+
+    events = generate_timeline(context)
+
+    # Serialize TimelineEvent dataclasses to plain dicts
+    return [
+        {
+            "event_type": event.event_type.value,
+            "title": event.title,
+            "description": event.description,
+            "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+            "week_number": event.week_number,
+            "is_current": event.is_current,
+            "metadata": _serialize_metadata(event.metadata),
+        }
+        for event in events
+    ]
+
+
+def _serialize_metadata(metadata) -> Optional[Dict[str, Any]]:
+    """Serialize UpcomingMilestoneMetadata to a plain dict."""
+    if metadata is None:
+        return None
+    result: Dict[str, Any] = {}
+    if metadata.days_remaining is not None:
+        result["days_remaining"] = metadata.days_remaining
+    if metadata.reflections_remaining is not None:
+        result["reflections_remaining"] = metadata.reflections_remaining
+    return result if result else None
+
+
+async def get_timeline(pool: Any, user_id: str) -> Dict[str, Any]:
+    """Get the relationship timeline for the user.
+
+    Returns a chronological list of timeline events derived from
+    existing journey data. No dedicated timeline table — all events
+    are computed on demand from journey_state, weekly_reflections,
+    compatibility_reports, and partner_connections.
+    """
+    async with pool.acquire() as conn:
+        resolved = await _resolve_connection(conn, user_id)
+        if not resolved:
+            raise NoConnectionError()
+
+        connection_id, _, _ = resolved
+        events = await _build_timeline(conn, connection_id, user_id)
+
+        return {"events": events}

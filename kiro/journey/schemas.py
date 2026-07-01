@@ -100,3 +100,29 @@ class HistoryResponse(BaseModel):
 
     reflections: List[HistoryEntry]
     total: int
+
+
+
+class TimelineEventMetadata(BaseModel):
+    """Optional metadata for upcoming milestone events."""
+
+    days_remaining: Optional[int] = None
+    reflections_remaining: Optional[int] = None
+
+
+class TimelineEventResponse(BaseModel):
+    """A single event on the relationship timeline."""
+
+    event_type: str = Field(..., description="Event category (e.g. reflection, milestone_duration)")
+    title: str = Field(..., description="Human-readable event title")
+    description: str = Field(default="", description="Supporting text")
+    occurred_at: Optional[str] = Field(default=None, description="ISO date when event occurred")
+    week_number: Optional[int] = Field(default=None, description="Journey week number")
+    is_current: bool = Field(default=False, description="Whether this is the current moment marker")
+    metadata: Optional[TimelineEventMetadata] = Field(default=None, description="Additional data for upcoming events")
+
+
+class TimelineResponse(BaseModel):
+    """Response containing the relationship timeline."""
+
+    events: List[TimelineEventResponse]
